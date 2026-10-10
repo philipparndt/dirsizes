@@ -3,6 +3,7 @@
 #   make                  build everything (release)
 #   make run DIR=~/dev    launch the app and scan DIR
 #   make app              build build/DirSizes.app (needed to grant Full Disk Access)
+#   make install          install DirSizes.app to /Applications (INSTALL_DIR=~/Applications)
 #   make icon             regenerate Resources/AppIcon.icns from Scripts/AppIcon.swift
 #   make scan DIR=~/dev   print the largest entries of DIR
 #   make bench DIR=~/dev  compare scanner, fts, FileManager and du
@@ -15,9 +16,10 @@ BIN_DIR    = .build/$(CONFIG)
 APP_NAME   = DirSizes
 APP        = build/$(APP_NAME).app
 BUNDLE_ID ?= local.dirsizes
+INSTALL_DIR ?= /Applications
 ICON       = Resources/AppIcon.icns
 
-.PHONY: all build run scan bench app open-app icon clean
+.PHONY: all build run scan bench app open-app install icon clean
 
 all: build
 
@@ -56,6 +58,13 @@ app: build
 
 open-app: app
 	open $(APP)
+
+# Grant Full Disk Access to the installed copy; its fixed location lets macOS remember it.
+install: app
+	mkdir -p "$(INSTALL_DIR)"
+	rm -rf "$(INSTALL_DIR)/$(APP_NAME).app"
+	ditto $(APP) "$(INSTALL_DIR)/$(APP_NAME).app"
+	@echo "Installed $(INSTALL_DIR)/$(APP_NAME).app"
 
 # The icon is drawn in code; the generated .icns is checked in so normal builds don't need this.
 icon:
