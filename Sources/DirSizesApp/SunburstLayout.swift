@@ -1,0 +1,178 @@
+import DirScanner
+import SwiftUI
+
+/// Space on a scanned disk that isn't a file in the tree, shown at the root of the chart.
+enum SpecialSpace: Equatable {
+    /// Used, but not seen by the scan (system volume, snapshots, swap, unreadable folders).
+    case hidden
+    case free
+}
+
+/// One ring segment. Angles are in radians, 0 at the top, increasing clockwise.
+struct Segment {
+    /// -1 for special segments, which have no node.
+    let node: Int32
+    /// 1 = innermost ring (children of the center node).
+    let depth: Int
+    let start: Double
+    let end: Double
+    var special: SpecialSpace?
+    /// 0...1, from the item's position in the root chart, so colors stay the same when zooming.
+    var hue: Double = 0
+
+    var mid: Double { (start + end) / 2 }
+}
+
+struct SunburstGeometry {
+    let center: CGPoint
+    let innerRadius: CGFloat
+    let ringWidth: CGFloat
+    let rings: Int
+
+    init(size: CGSize, rings: Int) {
+        self.rings = rings
+        center = CGPoint(x: size.width / 2, y: size.height / 2)
+        let outer = max(min(size.width, size.height) / 2 - 12, 40)
+        innerRadius = outer * 0.24
+        ringWidth = (outer - innerRadius) / CGFloat(rings)
+    }
+
+    func radii(depth: Int) -> (inner: CGFloat, outer: CGFloat) {
+        let inner = innerRadius + CGFloat(depth - 1) * ringWidth
+        return (inner, inner + ringWidth)
+    }
+
+    /// The ring segment shape. `depth` may be fractional (during animations); the part beyond
+    /// the outermost ring is clipped, and nil is returned when nothing is left.
+    func wedge(start: Double, end: Double, depth: Double) -> Path? {
+        let limit = innerRadius + CGFloat(rings) * ringWidth
+        let inner = innerRadius + CGFloat(depth - 1) * ringWidth
+        guard inner < limit else { return nil }
+        let outer = min(inner + ringWidth, limit)
+
+        // Shift by -90° so angle 0 is at the top; increasing angles run clockwise on screen.
+        let from = Angle(radians: start - .pi / 2)
+        let to = Angle(radians: end - .pi / 2)
+        var path = Path()
+        path.addArc(center: center, radius: outer, startAngle: from, endAngle: to, clockwise: false)
+        path.addArc(center: center, radius: inner, startAngle: to, endAngle: from, clockwise: true)
+        path.closeSubpath()
+        return path
+    }
+
+    enum Hit: Equatable {
+        case center
+        case segment(Int32)
+        case special(SpecialSpace)
+    }
+
+    func hitTest(_ point: CGPoint, segments: [Segment]) -> Hit? {
+        let dx = point.x - center.x
+        let dy = point.y - center.y
+        let r = (dx * dx + dy * dy).squareRoot()
+        if r < innerRadius { return .center }
+        let depth = Int((r - innerRadius) / ringWidth) + 1
+        // atan2 in y-down view coordinates; shift so 0 is at the top.
+        var angle = atan2(Double(dy), Double(dx)) + .pi / 2
+        if angle < 0 { angle += 2 * .pi }
+        return segments
+            .first { $0.depth == depth && $0.start <= angle && angle < $0.end }
+            .map { segment in segment.special.map(Hit.special) ?? .segment(segment.node) }
+    }
+}
+
+enum SunburstLayout {
+    /// Segments thinner than this (radians on screen) are not drawn.
+    static let minAngle = 0.01
+
+    /// Lays out `rings` levels below `center`. Children are sorted largest first, so once one
+    /// is too thin to see, all following siblings are too and the loop stops.
+    /// Angle taken by the scanned tree at the root; the rest of the circle is `extras`.
+    static func rootSpan(tree: FileTree, extras: [(SpecialSpace, Int64)]) -> Double {
+        let scanned = Double(tree.root.size)
+        let total = scanned + Double(extras.reduce(0) { $0 + $1.1 })
+        return total > 0 ? 2 * .pi * scanned / total : 2 * .pi
+    }
+
+    /// `extras` (free and hidden space) are only shown when centered on the root.
+    static func segments(tree: FileTree, center: Int32, rings: Int,
+                         extras: [(SpecialSpace, Int64)] = []) -> [Segment] {
+        var result: [Segment] = []
+
+        // Free and hidden space are only drawn at the root, but always take their share of the
+        // root chart, which is what item hues are based on.
+        let shownExtras = center == 0 ? extras : []
+        let span = rootSpan(tree: tree, extras: shownExtras)
+
+        // Hues come from where the center sits in the root chart: zooming in keeps every item's color.
+        let centerRange = center == 0 ? (start: 0.0, end: 2 * Double.pi)
+            : slice(of: center, within: 0, tree: tree, span: rootSpan(tree: tree, extras: extras))
+                .map { (start: $0.start, end: $0.end) } ?? (start: 0, end: 2 * .pi)
+        func hue(_ start: Double, _ end: Double) -> Double {
+            let mid = (start + end) / 2
+            return (centerRange.start + mid * (centerRange.end - centerRange.start) / (2 * .pi)) / (2 * .pi)
+        }
+
+        func visit(_ node: Int32, depth: Int, start: Double, end: Double) {
+            let total = Double(tree.nodes[Int(node)].size)
+            guard depth < rings, total > 0 else { return }
+            var angle = start
+            for child in tree.children(of: node) {
+                let size = Double(tree.nodes[Int(child)].size)
+                let sweep = (end - start) * size / total
+                if sweep < minAngle { break }
+                result.append(Segment(node: child, depth: depth + 1, start: angle, end: angle + sweep,
+                                      hue: hue(angle, angle + sweep)))
+                if tree.nodes[Int(child)].isDirectory {
+                    visit(child, depth: depth + 1, start: angle, end: angle + sweep)
+                }
+                angle += sweep
+            }
+        }
+
+        visit(center, depth: 0, start: 0, end: span)
+
+        let total = Double(tree.root.size) + Double(shownExtras.reduce(0) { $0 + $1.1 })
+        var angle = span
+        for (kind, bytes) in shownExtras where total > 0 {
+            let sweep = 2 * .pi * Double(bytes) / total
+            if sweep >= minAngle {
+                result.append(Segment(node: -1, depth: 1, start: angle, end: angle + sweep, special: kind))
+            }
+            angle += sweep
+        }
+        return result
+    }
+
+    /// Angular range and ring depth of `node` inside the chart centered on `ancestor`.
+    struct Slice {
+        let start: Double
+        let end: Double
+        let depth: Int
+    }
+
+    /// Computed from sizes, not from drawn segments, so it also works for nodes too deep
+    /// or too thin to be drawn.
+    /// `span` is the angle the ancestor's contents occupy (less than a full circle at a disk's
+    /// root, where free and hidden space take the rest).
+    static func slice(of node: Int32, within ancestor: Int32, tree: FileTree,
+                      span: Double = 2 * .pi) -> Slice? {
+        let chain = tree.ancestry(of: node)
+        guard let top = chain.firstIndex(of: ancestor) else { return nil }
+        var start = 0.0
+        var end = span
+        for (parent, child) in zip(chain[top...], chain[(top + 1)...]) {
+            let total = Double(tree.nodes[Int(parent)].size)
+            guard total > 0 else { return nil }
+            var offset = 0.0
+            for sibling in tree.children(of: parent) {
+                if sibling == child { break }
+                offset += Double(tree.nodes[Int(sibling)].size)
+            }
+            let span = end - start
+            start += span * offset / total
+            end = start + span * Double(tree.nodes[Int(child)].size) / total
+        }
+        return Slice(start: start, end: end, depth: chain.count - 1 - top)
+    }
+}

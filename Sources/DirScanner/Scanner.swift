@@ -1,0 +1,325 @@
+import Darwin
+import Foundation
+import Synchronization
+
+public struct ScanResult: Sendable {
+    public let tree: FileTree
+    public let files: Int
+    public let directories: Int
+    public let errors: Int
+    public let duration: Duration
+
+    public var totalBytes: Int64 { tree.root.size }
+}
+
+/// Parallel directory scanner built on `getattrlistbulk(2)`.
+///
+/// Each directory is opened once and its entries (name, type, inode, link count,
+/// allocated size) are read in bulk, many per syscall, instead of readdir + lstat
+/// per entry. Directories are processed by a pool of worker threads pulling from a
+/// shared LIFO stack (depth-first keeps the pending set small).
+public final class DiskScanner: @unchecked Sendable {
+    public let rootPath: String
+    public let threadCount: Int
+    public let stayOnDevice: Bool
+
+    // Live progress, readable from any thread while a scan runs.
+    public let filesScanned = Atomic<Int>(0)
+    public let bytesScanned = Atomic<Int64>(0)
+    public let directoriesScanned = Atomic<Int>(0)
+    public let errorCount = Atomic<Int>(0)
+
+    private static let bufferSize = 256 * 1024
+
+    private let tree: FileTree
+    private let treeLock = NSLock()
+    private var seenHardLinks = Set<UInt64>()
+    /// Set under `treeLock` when `scan()` stops accepting results (finished or cancelled).
+    private var frozen = false
+    private let cancelled = Atomic<Bool>(false)
+
+    private let queue = NSCondition()
+    private var stack: [Job] = []
+    /// Jobs queued or in progress. The scan is done when this reaches zero.
+    private var pending = 0
+    private var rootDevice: dev_t = 0
+
+    private struct Job {
+        let path: String
+        let index: Int32
+    }
+
+    public init(path: String, threads: Int = ProcessInfo.processInfo.activeProcessorCount,
+                stayOnDevice: Bool = true) {
+        var normalized = (path as NSString).expandingTildeInPath
+        while normalized.count > 1 && normalized.hasSuffix("/") { normalized.removeLast() }
+        rootPath = normalized
+        threadCount = max(1, threads)
+        self.stayOnDevice = stayOnDevice
+        tree = FileTree(rootName: normalized)
+    }
+
+    public func scan() -> ScanResult {
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        var st = stat()
+        if stat(rootPath, &st) == 0 { rootDevice = st.st_dev }
+
+        stack = [Job(path: rootPath, index: 0)]
+        pending = 1
+
+        let group = DispatchGroup()
+        for _ in 0..<threadCount {
+            group.enter()
+            let thread = Thread { [self] in
+                worker()
+                group.leave()
+            }
+            thread.qualityOfService = .userInitiated
+            thread.start()
+        }
+        // On cancel, don't wait for workers: one can be stuck in the kernel indefinitely
+        // (e.g. on a network or File Provider volume). Their late results are discarded.
+        while group.wait(timeout: .now() + .milliseconds(50)) == .timedOut {
+            if isCancelled { break }
+        }
+
+        treeLock.lock()
+        frozen = true
+        tree.finalize()
+        tree.buildChildIndex()
+        treeLock.unlock()
+        return ScanResult(tree: tree,
+                          files: filesScanned.load(ordering: .relaxed),
+                          directories: directoriesScanned.load(ordering: .relaxed),
+                          errors: errorCount.load(ordering: .relaxed),
+                          duration: clock.now - start)
+    }
+
+    /// Stops the scan early. `scan()` then returns the partial tree.
+    public func cancel() {
+        cancelled.store(true, ordering: .relaxed)
+        queue.lock()
+        queue.broadcast()
+        queue.unlock()
+    }
+
+    public var isCancelled: Bool { cancelled.load(ordering: .relaxed) }
+
+    // MARK: - Work queue
+
+    private func nextJob() -> Job? {
+        queue.lock()
+        defer { queue.unlock() }
+        while stack.isEmpty && pending > 0 && !isCancelled { queue.wait() }
+        return isCancelled ? nil : stack.popLast()
+    }
+
+    private func finish(_ job: Job, pushing subdirectories: [Job]) {
+        queue.lock()
+        stack.append(contentsOf: subdirectories)
+        pending += subdirectories.count - 1
+        if pending == 0 {
+            queue.broadcast()
+        } else {
+            for _ in 0..<min(subdirectories.count, threadCount) { queue.signal() }
+        }
+        queue.unlock()
+    }
+
+    private func worker() {
+        // Never trigger downloads of iCloud / File Provider items that were evicted from disk
+        // ("dataless"). Listing one would otherwise block until it is downloaded.
+        setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD,
+                       IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+        let buffer = UnsafeMutableRawPointer.allocate(byteCount: Self.bufferSize, alignment: 16)
+        defer { buffer.deallocate() }
+        var batch = Batch()
+        while let job = nextJob() {
+            let subdirectories = scanDirectory(job, buffer: buffer, batch: &batch)
+            finish(job, pushing: subdirectories)
+        }
+    }
+
+    // MARK: - Directory scanning
+
+    /// Per-worker scratch space, reused across directories to avoid reallocations.
+    private struct Batch {
+        var nodes: [Node] = []
+        var names: [UInt8] = []
+        var hardLinkIDs: [(local: Int, fileID: UInt64)] = []
+        var subdirectoryNames: [(local: Int, name: String)] = []
+
+        mutating func reset() {
+            nodes.removeAll(keepingCapacity: true)
+            names.removeAll(keepingCapacity: true)
+            hardLinkIDs.removeAll(keepingCapacity: true)
+            subdirectoryNames.removeAll(keepingCapacity: true)
+        }
+    }
+
+    private func scanDirectory(_ job: Job, buffer: UnsafeMutableRawPointer, batch: inout Batch) -> [Job] {
+        let fd = open(job.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else {
+            errorCount.add(1, ordering: .relaxed)
+            return []
+        }
+        defer { close(fd) }
+
+        if stayOnDevice && job.index != 0 {
+            var st = stat()
+            if fstat(fd, &st) == 0 && st.st_dev != rootDevice { return [] }
+        }
+        directoriesScanned.add(1, ordering: .relaxed)
+
+        var attrs = attrlist()
+        attrs.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+        attrs.commonattr = attrgroup_t(ATTR_CMN_RETURNED_ATTRS) | attrgroup_t(ATTR_CMN_NAME)
+            | attrgroup_t(ATTR_CMN_ERROR) | attrgroup_t(ATTR_CMN_OBJTYPE) | attrgroup_t(ATTR_CMN_FLAGS)
+            | attrgroup_t(ATTR_CMN_FILEID)
+        attrs.fileattr = attrgroup_t(ATTR_FILE_LINKCOUNT) | attrgroup_t(ATTR_FILE_ALLOCSIZE)
+
+        batch.reset()
+        var fileCount = 0
+        var byteCount: Int64 = 0
+
+        while true {
+            let count = getattrlistbulk(fd, &attrs, buffer, Self.bufferSize, 0)
+            if count < 0 { errorCount.add(1, ordering: .relaxed); break }
+            if count == 0 { break }
+
+            var entry = UnsafeRawPointer(buffer)
+            for _ in 0..<count {
+                let length = Int(entry.loadUnaligned(as: UInt32.self))
+                defer { entry += length }
+                if let parsed = parseEntry(entry + MemoryLayout<UInt32>.size) {
+                    append(parsed, parent: job.index, to: &batch)
+                    if parsed.kind != .directory {
+                        fileCount += 1
+                        byteCount += parsed.size
+                    }
+                }
+            }
+        }
+
+        filesScanned.add(fileCount, ordering: .relaxed)
+        bytesScanned.add(byteCount, ordering: .relaxed)
+        return commit(batch: &batch, parentPath: job.path)
+    }
+
+    private struct Entry {
+        var name: UnsafeRawBufferPointer
+        var kind: Node.Kind
+        /// Evicted to iCloud / a File Provider: occupies no local space, must not be descended into.
+        var isDataless: Bool
+        var fileID: UInt64
+        var linkCount: UInt32
+        var size: Int64
+    }
+
+    /// Parses one packed entry. Attributes appear in bitmap order, except ATTR_CMN_ERROR
+    /// which directly follows the returned-attributes set (see getattrlistbulk(2)).
+    /// Only attributes flagged in `returned` are present in the buffer.
+    private func parseEntry(_ start: UnsafeRawPointer) -> Entry? {
+        var p = start
+        let returned = p.loadUnaligned(as: attribute_set_t.self)
+        p += MemoryLayout<attribute_set_t>.size
+
+        if returned.commonattr & attrgroup_t(ATTR_CMN_ERROR) != 0 {
+            let error = p.loadUnaligned(as: UInt32.self)
+            p += 4
+            if error != 0 {
+                errorCount.add(1, ordering: .relaxed)
+                return nil
+            }
+        }
+
+        guard returned.commonattr & attrgroup_t(ATTR_CMN_NAME) != 0 else { return nil }
+        let nameRef = p.loadUnaligned(as: attrreference_t.self)
+        // attr_length includes the trailing NUL.
+        let name = UnsafeRawBufferPointer(start: p + Int(nameRef.attr_dataoffset),
+                                          count: max(Int(nameRef.attr_length) - 1, 0))
+        p += MemoryLayout<attrreference_t>.size
+
+        var kind = Node.Kind.other
+        if returned.commonattr & attrgroup_t(ATTR_CMN_OBJTYPE) != 0 {
+            switch p.loadUnaligned(as: fsobj_type_t.self) {
+            case VREG.rawValue: kind = .file
+            case VDIR.rawValue: kind = .directory
+            case VLNK.rawValue: kind = .symlink
+            default: kind = .other
+            }
+            p += MemoryLayout<fsobj_type_t>.size
+        }
+
+        var isDataless = false
+        if returned.commonattr & attrgroup_t(ATTR_CMN_FLAGS) != 0 {
+            isDataless = p.loadUnaligned(as: UInt32.self) & UInt32(SF_DATALESS) != 0
+            p += 4
+        }
+
+        var fileID: UInt64 = 0
+        if returned.commonattr & attrgroup_t(ATTR_CMN_FILEID) != 0 {
+            fileID = p.loadUnaligned(as: UInt64.self)
+            p += 8
+        }
+
+        var linkCount: UInt32 = 1
+        if returned.fileattr & attrgroup_t(ATTR_FILE_LINKCOUNT) != 0 {
+            linkCount = p.loadUnaligned(as: UInt32.self)
+            p += 4
+        }
+
+        var size: Int64 = 0
+        if returned.fileattr & attrgroup_t(ATTR_FILE_ALLOCSIZE) != 0 {
+            size = p.loadUnaligned(as: Int64.self)
+            p += 8
+        }
+
+        return Entry(name: name, kind: kind, isDataless: isDataless, fileID: fileID,
+                     linkCount: linkCount, size: size)
+    }
+
+    private func append(_ entry: Entry, parent: Int32, to batch: inout Batch) {
+        let local = batch.nodes.count
+        batch.nodes.append(Node(size: entry.kind == .directory ? 0 : entry.size,
+                                parent: parent,
+                                nameOffset: UInt32(batch.names.count),
+                                itemCount: 0,
+                                nameLength: UInt16(clamping: entry.name.count),
+                                kind: entry.kind))
+        batch.names.append(contentsOf: entry.name)
+        if entry.kind == .directory && !entry.isDataless {
+            batch.subdirectoryNames.append((local, String(decoding: entry.name, as: UTF8.self)))
+        } else if entry.linkCount > 1 {
+            batch.hardLinkIDs.append((local, entry.fileID))
+        }
+    }
+
+    /// Appends a directory's entries to the shared tree under one lock acquisition.
+    private func commit(batch: inout Batch, parentPath: String) -> [Job] {
+        treeLock.lock()
+        if frozen {
+            treeLock.unlock()
+            return []
+        }
+        let base = tree.nodes.count
+        let nameBase = UInt32(tree.names.count)
+
+        // Count each hard-linked file once (same inode seen via several paths).
+        for (local, fileID) in batch.hardLinkIDs where !seenHardLinks.insert(fileID).inserted {
+            batch.nodes[local].size = 0
+        }
+        for i in batch.nodes.indices { batch.nodes[i].nameOffset += nameBase }
+
+        tree.nodes.append(contentsOf: batch.nodes)
+        tree.names.append(contentsOf: batch.names)
+        treeLock.unlock()
+
+        let separator = parentPath == "/" ? "" : "/"
+        return batch.subdirectoryNames.map { local, name in
+            Job(path: parentPath + separator + name, index: Int32(base + local))
+        }
+    }
+}
