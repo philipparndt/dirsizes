@@ -57,6 +57,7 @@ cask "dirsizes" do
   binary "#{appdir}/DirSizes.app/Contents/Resources/bin/dirsizes"
 
   zap trash: [
+    "~/Library/Application Support/de.rnd7.dirsizes",
     "~/Library/Preferences/de.rnd7.dirsizes.plist",
     "~/Library/Saved Application State/de.rnd7.dirsizes.savedState",
   ]

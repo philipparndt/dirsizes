@@ -3,18 +3,28 @@ import SwiftUI
 
 @main
 struct DirSizesApp: App {
-    @State private var model = ScanModel()
+    @State private var model: ScanModel
+    private let mcp: DirSizesMCP
 
     init() {
         // Launched via `swift run` there is no app bundle; make it a regular foreground app.
         NSApplication.shared.setActivationPolicy(.regular)
         DispatchQueue.main.async { NSApp.activate() }
+
+        let model = ScanModel()
+        _model = State(initialValue: model)
+        mcp = DirSizesMCP(model: model)
+        // A screenshot run quits right away and must not take over a running app's endpoint.
+        if UserDefaults.standard.string(forKey: "screenshot") == nil {
+            mcp.start()
+        }
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environment(model)
+                .environment(mcp)
                 .onAppear {
                     // `DirSizesApp -path <folder>` starts scanning right away. A dash option (read via
                     // the user-defaults argument domain) rather than a bare path: AppKit treats bare

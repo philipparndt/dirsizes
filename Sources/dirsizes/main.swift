@@ -5,10 +5,13 @@ let usage = """
     usage:
       dirsizes scan  <path> [--threads N] [--top N] [--cross-devices]
       dirsizes bench <path> [--runs N] [--skip fm,fts,du]
+      dirsizes mcp
 
     scan   Scan <path> with the parallel getattrlistbulk scanner and print the largest entries.
     bench  Compare the scanner (1 thread and N threads) against FileManager, fts and du.
            Runs are warm-cache; run `sudo purge` first for a cold-cache number.
+    mcp    MCP server on stdio for AI clients, forwarding to the DirSizes app (started if needed).
+           Lets the AI scan, explore and fill the collector; it cannot delete anything.
     """
 
 func formatBytes(_ bytes: Int64) -> String {
@@ -166,6 +169,8 @@ extension String {
         count >= width ? " " + self : String(repeating: " ", count: width - count) + self
     }
 }
+
+if CommandLine.arguments.dropFirst().first == "mcp" { runMCPBridge() }
 
 let options = parseOptions()
 switch options.command {

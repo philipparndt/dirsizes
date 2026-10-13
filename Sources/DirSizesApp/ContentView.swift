@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(ScanModel.self) private var model
+    @State private var showsMCPSetup = false
 
     var body: some View {
         // A plain VStack rather than safeAreaInset: HSplitView ignores safe-area insets, which let
@@ -52,6 +53,9 @@ struct ContentView: View {
                         .disabled(model.rootPath == nil)
                 }
                 Button("Open…", systemImage: "folder") { model.chooseFolder() }
+                Button("Use with Claude", systemImage: "sparkles") { showsMCPSetup.toggle() }
+                    .help("Connect Claude Code to DirSizes")
+                    .popover(isPresented: $showsMCPSetup, arrowEdge: .bottom) { MCPSetupView() }
             }
         }
         .navigationTitle(model.rootPath == nil ? "DirSizes" : model.rootName)

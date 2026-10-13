@@ -18,6 +18,8 @@ and a collector to clean it up.
   space the scan couldn't account for (snapshots, purgeable data, folders without access).
 - **Collector.** Drag files and folders from the chart, the list or Finder into the
   collector, then move them to the Trash or delete them in one go.
+- **MCP server.** An AI assistant can scan, explore the results and put items in the
+  collector for you to review. It can't delete anything.
 - **Command-line scanner.** `dirsizes scan` prints the largest entries. `dirsizes bench`
   compares the scanner with `FileManager`, `fts` and `du`.
 
@@ -42,11 +44,50 @@ it. Without that permission those folders count as unreadable and their size sho
 hidden space. To scan everything, add DirSizes under **System Settings › Privacy & Security ›
 Full Disk Access**.
 
+## MCP server
+
+DirSizes includes an MCP server so an AI assistant such as Claude can answer "what is taking up
+space?" and suggest a cleanup. It can scan folders and disks, list and search the results and
+add items to the collector. Deleting stays with you: the collected items show up in the app,
+where you decide whether to move them to the Trash.
+
+Click the ✨ **Use with Claude** button in the toolbar. It shows the command that adds DirSizes
+to Claude Code, with a Copy button. With the Homebrew cask that is:
+
+```sh
+claude mcp add --scope user dirsizes -- dirsizes mcp
+```
+
+For other clients, configure a stdio server that runs `dirsizes mcp`:
+
+```json
+{
+  "mcpServers": {
+    "dirsizes": { "command": "/Applications/DirSizes.app/Contents/Resources/bin/dirsizes", "args": ["mcp"] }
+  }
+}
+```
+
+`dirsizes mcp` forwards to the running app and starts it if needed. The app listens on a
+random loopback port with a token that changes every launch, written to
+`~/Library/Application Support/de.rnd7.dirsizes/mcp.json` (readable by you only).
+
+| Tool | What it does |
+| --- | --- |
+| `status` | What was scanned, totals, scan progress, collector summary |
+| `list_disks` | Mounted disks with capacity and free space |
+| `scan` | Scan a folder or disk and wait for the result |
+| `list` | Contents of a folder, largest first |
+| `largest` | Largest files or folders anywhere below a folder |
+| `search` | Find by name or glob, e.g. every `node_modules` with its total |
+| `collector`, `collect`, `uncollect`, `clear_collector` | Read and change the collector (never deletes) |
+
 ## Command line
 
 ```
 dirsizes scan  <path> [--threads N] [--top N] [--cross-devices]
 dirsizes bench <path> [--runs N] [--skip fm,fts,du]
+dirsizes mcp
 ```
 
 By default `scan` stays on the device it starts on. Add `--cross-devices` to follow mounts.

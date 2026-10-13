@@ -93,6 +93,19 @@ public final class FileTree: @unchecked Sendable {
         return false
     }
 
+    /// For every node, whether it lies inside `index` (inclusive) and wasn't removed. One forward
+    /// pass, since parents always come before their children.
+    public func subtreeMask(of index: Int32) -> [Bool] {
+        var mask = [Bool](repeating: false, count: nodes.count)
+        guard Int(index) < nodes.count, !isRemoved(index) else { return mask }
+        mask[Int(index)] = true
+        for i in (Int(index) + 1)..<nodes.count {
+            let parent = Int(nodes[i].parent)
+            mask[i] = parent >= 0 && mask[parent] && !removed.contains(Int32(i))
+        }
+        return mask
+    }
+
     /// Takes a deleted file or folder out of the tree and subtracts it from all ancestors.
     public func remove(_ index: Int32) {
         guard index > 0, !isRemoved(index) else { return }
