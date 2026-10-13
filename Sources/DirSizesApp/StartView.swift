@@ -11,6 +11,8 @@ struct StartView: View {
                     .font(.title2.weight(.semibold))
                     .padding(.bottom, 6)
 
+                FullDiskAccessBanner()
+
                 ForEach(model.volumes) { volume in
                     VolumeCard(volume: volume)
                 }

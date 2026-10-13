@@ -45,10 +45,11 @@ Requires macOS 15 or newer, on Apple silicon or Intel.
 
 ### Full Disk Access
 
-macOS hides some folders (Mail, Safari, other apps' containers) from apps until you allow
-it. Without that permission those folders count as unreadable and their size shows up as
-hidden space. To scan everything, add DirSizes under **System Settings › Privacy & Security ›
-Full Disk Access**.
+macOS protects some folders (Desktop, Documents, Music, Photos, Mail, other apps' data).
+Without Full Disk Access, it asks about each one separately during a scan, and the folders it
+can't read show up as hidden space. DirSizes therefore asks for Full Disk Access at launch:
+**Open System Settings** goes straight to **Privacy & Security › Full Disk Access**, and the
+scan starts as soon as you turn DirSizes on. **Not Now** scans without it.
 
 ## MCP server
 

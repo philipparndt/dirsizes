@@ -35,6 +35,10 @@ struct ContentView: View {
             StatusBar()
         }
         .frame(minWidth: 820, minHeight: 560)
+        .sheet(isPresented: Binding(get: { model.asksForFullDiskAccess },
+                                    set: { if !$0 && model.asksForFullDiskAccess { model.declineFullDiskAccess() } })) {
+            FullDiskAccessSheet()
+        }
         .alert("Some items could not be deleted", isPresented: Binding(
             get: { !model.deletionErrors.isEmpty },
             set: { if !$0 { model.deletionErrors = [] } })

@@ -64,6 +64,10 @@ final class ScanModel {
     private(set) var collected: [Int32] = []
     /// The collector fills the window for reviewing (chart and tree of what will be deleted).
     var showsCollectorReview = false
+    /// The Full Disk Access sheet is up; `pendingScan` runs once it is answered.
+    var asksForFullDiskAccess = false
+    private var pendingScan: (() -> Void)?
+    private var declinedFullDiskAccess = false
     /// Set while the collector is being deleted.
     private(set) var deletion: DeletionProgress?
     var isDeleting: Bool { deletion != nil }
@@ -168,8 +172,43 @@ final class ScanModel {
     }
 
     func scan(volume: VolumeInfo) {
-        scan(path: volume.scanPath)
-        scannedVolume = Self.refreshed(volume)
+        withFullDiskAccess {
+            self.startScan(path: volume.scanPath)
+            self.scannedVolume = Self.refreshed(volume)
+        }
+    }
+
+    func scan(path: String) {
+        withFullDiskAccess { self.startScan(path: path) }
+    }
+
+    /// Asks for Full Disk Access first (unless declined this session), so the scan doesn't
+    /// trigger a macOS dialog for every protected folder.
+    private func withFullDiskAccess(_ scan: @escaping () -> Void) {
+        if declinedFullDiskAccess || FullDiskAccess.isGranted {
+            scan()
+        } else {
+            pendingScan = scan
+            asksForFullDiskAccess = true
+        }
+    }
+
+    /// At launch, before a disk is chosen.
+    func requestFullDiskAccess() {
+        if !FullDiskAccess.isGranted { asksForFullDiskAccess = true }
+    }
+
+    func fullDiskAccessGranted() {
+        asksForFullDiskAccess = false
+        pendingScan?()
+        pendingScan = nil
+    }
+
+    func declineFullDiskAccess() {
+        declinedFullDiskAccess = true
+        asksForFullDiskAccess = false
+        pendingScan?()
+        pendingScan = nil
     }
 
     /// Current free space; it changes while the app runs.
@@ -197,7 +236,7 @@ final class ScanModel {
         }
     }
 
-    func scan(path: String) {
+    private func startScan(path: String) {
         scanner?.cancel()
         pollTask?.cancel()
 

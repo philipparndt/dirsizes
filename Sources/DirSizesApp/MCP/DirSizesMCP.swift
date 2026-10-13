@@ -94,8 +94,12 @@ final class DirSizesMCP {
             }
             model.open(path: path)
             let deadline = Date().addingTimeInterval(number(args["wait_seconds"]) ?? 120)
-            while model.phase == .scanning, Date() < deadline {
+            while model.phase == .scanning || model.asksForFullDiskAccess, Date() < deadline {
                 try await Task.sleep(for: .milliseconds(200))
+            }
+            if model.asksForFullDiskAccess {
+                throw MCPServer.ToolError("DirSizes is asking the user for Full Disk Access; the scan "
+                    + "starts once they answer in the app. Call status to check on it.")
             }
             return json(status())
         }

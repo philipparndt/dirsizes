@@ -34,6 +34,9 @@ struct DirSizesApp: App {
                         model.showDemo()
                     } else if model.phase == .idle, let path = defaults.string(forKey: "path") {
                         model.open(path: path)
+                    } else if defaults.string(forKey: "screenshot") == nil {
+                        // Ask right away rather than with the first scan's macOS dialogs.
+                        model.requestFullDiskAccess()
                     }
                     // `-screenshot <file.png>` saves the window once it has drawn, then quits.
                     if let file = defaults.string(forKey: "screenshot") {
