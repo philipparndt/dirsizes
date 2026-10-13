@@ -17,7 +17,13 @@ and a collector to clean it up.
 - **Whole disks.** Pick a disk on the start screen and the chart also shows free space and
   space the scan couldn't account for (snapshots, purgeable data, folders without access).
 - **Collector.** Drag files and folders from the chart, the list or Finder into the
-  collector, then move them to the Trash or delete them in one go.
+  collector, then move them to the Trash or delete them in one go, with progress in bytes.
+  Expand it to review everything as a chart and a tree, and keep single items out of a
+  collected folder before deleting.
+- **Fast permanent delete.** Uses the scan to delete many files in parallel, several times
+  faster than `rm -rf` on folders with tens of thousands of files.
+- **Live updates.** Items deleted by other apps after the scan turn gray, so you can see
+  what is already gone without scanning again.
 - **MCP server.** An AI assistant can scan, explore the results and put items in the
   collector for you to review. It can't delete anything.
 - **Command-line scanner.** `dirsizes scan` prints the largest entries. `dirsizes bench`

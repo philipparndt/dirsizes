@@ -11,6 +11,8 @@ struct ContentView: View {
         VStack(spacing: 0) {
             if model.tree == nil {
                 EmptyState()
+            } else if model.showsCollectorReview {
+                CollectorReviewView()
             } else {
                 HSplitView {
                     VStack(spacing: 0) {
@@ -19,10 +21,12 @@ struct ContentView: View {
                             .padding(8)
                     }
                     .frame(minWidth: 480)
-                    VStack(spacing: 0) {
+                    // Drag the divider to give the collector more room.
+                    VSplitView {
                         ChildList()
-                        Divider()
+                            .frame(minHeight: 120)
                         CollectorView()
+                            .frame(minHeight: 150, idealHeight: 240)
                     }
                     .frame(minWidth: 260, idealWidth: 320, maxWidth: 480)
                 }
@@ -114,7 +118,7 @@ private struct ChildList: View {
                 let node = tree.nodes[Int(child)]
                 ChildRow(name: tree.name(of: child), node: node,
                          fraction: Double(node.size) / Double(parentSize),
-                         highlighted: model.hovered == child)
+                         highlighted: model.hovered == child, gone: model.isGone(child))
                     .contentShape(Rectangle())
                     .onTapGesture { model.zoom(to: child) }
                     .onHover { inside in model.hovered = inside ? child : nil }
@@ -133,15 +137,19 @@ private struct ChildRow: View {
     let node: Node
     let fraction: Double
     let highlighted: Bool
+    /// Deleted by another app since the scan.
+    let gone: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Image(systemName: node.isDirectory ? "folder.fill" : "doc")
-                    .foregroundStyle(node.isDirectory ? Color.accentColor : .secondary)
+                    .foregroundStyle(node.isDirectory && !gone ? Color.accentColor : .secondary)
                 Text(name)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .foregroundStyle(gone ? .secondary : .primary)
+                    .strikethrough(gone)
                 Spacer()
                 Text(formatBytes(node.size))
                     .monospacedDigit()
@@ -149,13 +157,14 @@ private struct ChildRow: View {
             }
             GeometryReader { proxy in
                 Capsule()
-                    .fill(Color.accentColor.opacity(0.6))
+                    .fill(gone ? Color.gray.opacity(0.5) : Color.accentColor.opacity(0.6))
                     .frame(width: max(proxy.size.width * fraction, 1))
             }
             .frame(height: 3)
         }
         .padding(.vertical, 2)
         .background(highlighted ? Color.accentColor.opacity(0.12) : .clear)
+        .help(gone ? "Deleted outside DirSizes since the scan" : "")
     }
 }
 
@@ -178,6 +187,13 @@ private struct StatusBar: View {
                 if model.errors > 0 {
                     Text("· \(model.errors) unreadable")
                         .help("Grant Full Disk Access to scan protected folders.")
+                }
+                let gone = model.goneSummary
+                if gone.count > 0 {
+                    Text("· \(gone.count == 1 ? "1 item" : "\(gone.count) items") (\(formatBytes(gone.bytes))) deleted elsewhere")
+                        .help("Deleted by another app since the scan. Shown in gray; rescan to update the totals.")
+                    Button("Rescan") { model.rescan() }
+                        .buttonStyle(.link)
                 }
             }
             Spacer()

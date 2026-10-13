@@ -266,6 +266,14 @@ final class DirSizesMCP {
                 info[special == .free ? "free_space" : "hidden_space"] = sizeInfo(bytes)
             }
             info["collector"] = ["items": model.collected.count, "size": sizeInfo(model.collectedBytes)]
+            let gone = model.goneSummary
+            if gone.count > 0 {
+                info["deleted_elsewhere"] = ["items": gone.count, "size": sizeInfo(gone.bytes),
+                                             "hint": "Deleted by another app since the scan; scan again to update totals."]
+            }
+            if let deletion = model.deletion {
+                info["deleting"] = ["done": deletion.done, "total": deletion.total]
+            }
         case .idle:
             break
         }
@@ -286,6 +294,7 @@ final class DirSizesMCP {
         ]
         if item.isDirectory { info["files"] = Int(item.itemCount) }
         if model.isCollected(node) { info["collected"] = true }
+        if model.isGone(node) { info["deleted_elsewhere"] = true }
         return info
     }
 

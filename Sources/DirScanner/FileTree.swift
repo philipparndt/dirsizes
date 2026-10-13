@@ -1,3 +1,5 @@
+import Foundation
+
 /// One file or directory. Kept small (24 bytes) because a full disk scan can produce
 /// millions of these; names live in a shared byte buffer instead of per-node Strings.
 public struct Node: Sendable {
@@ -31,6 +33,9 @@ public final class FileTree: @unchecked Sendable {
     private var childList: [Int32] = []
     /// Nodes deleted after the scan. Their subtrees are unreachable through `children(of:)`.
     private var removed = Set<Int32>()
+    /// `remove(_:)` is the only mutation after the scan and runs on the main thread, so main-thread
+    /// readers need no lock. Readers on other threads go through `read(_:)`.
+    private let lock = NSLock()
 
     init(rootName: String) {
         let bytes = Array(rootName.utf8)
@@ -106,8 +111,15 @@ public final class FileTree: @unchecked Sendable {
         return mask
     }
 
+    /// Runs `body` with the tree locked against `remove(_:)`, for reading off the main thread.
+    public func read<T>(_ body: (FileTree) throws -> T) rethrows -> T {
+        try lock.withLock { try body(self) }
+    }
+
     /// Takes a deleted file or folder out of the tree and subtracts it from all ancestors.
     public func remove(_ index: Int32) {
+        lock.lock()
+        defer { lock.unlock() }
         guard index > 0, !isRemoved(index) else { return }
         let node = nodes[Int(index)]
         let count = node.isDirectory ? node.itemCount : 1
@@ -134,8 +146,10 @@ public final class FileTree: @unchecked Sendable {
         return current
     }
 
-    /// Sum sizes and item counts into parents.
+    /// Sum sizes and item counts into parents, and index children. After this the tree only
+    /// changes through `remove(_:)`.
     func finalize() {
+        defer { buildChildIndex() }
         for i in stride(from: nodes.count - 1, to: 0, by: -1) {
             let node = nodes[i]
             let p = Int(node.parent)

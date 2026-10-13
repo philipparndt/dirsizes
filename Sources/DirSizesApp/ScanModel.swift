@@ -62,12 +62,22 @@ final class ScanModel {
 
     /// Items queued for deletion. Never contains both a folder and something inside it.
     private(set) var collected: [Int32] = []
-    private(set) var isDeleting = false
+    /// The collector fills the window for reviewing (chart and tree of what will be deleted).
+    var showsCollectorReview = false
+    /// Set while the collector is being deleted.
+    private(set) var deletion: DeletionProgress?
+    var isDeleting: Bool { deletion != nil }
     /// Failures from the last deletion, shown in an alert.
     var deletionErrors: [String] = []
 
+    /// Items deleted by other apps since the scan (top-most ones; their contents count as gone
+    /// too). They stay in the tree and are drawn gray until the next scan.
+    private(set) var gone = Set<Int32>()
+
     private var scanner: DiskScanner?
     private var pollTask: Task<Void, Never>?
+    private var monitor: DeletionMonitor?
+    private var deletionRun: CollectorDeletion?
 
     var focused: Int32 { hovered ?? center }
 
@@ -107,6 +117,7 @@ final class ScanModel {
         scanner?.cancel()
         pollTask?.cancel()
         scanner = nil
+        stopMonitoring()
         phase = .idle
         rootPath = nil
         scannedVolume = nil
@@ -114,6 +125,7 @@ final class ScanModel {
         segments = []
         transition = nil
         collected = []
+        showsCollectorReview = false
         hovered = nil
         hoveredSpecial = nil
         loadVolumes()
@@ -189,6 +201,7 @@ final class ScanModel {
         scanner?.cancel()
         pollTask?.cancel()
 
+        stopMonitoring()
         let scanner = DiskScanner(path: path)
         self.scanner = scanner
         rootPath = scanner.rootPath
@@ -201,6 +214,7 @@ final class ScanModel {
         segments = []
         transition = nil
         collected = []
+        showsCollectorReview = false
         filesScanned = 0
         bytesScanned = 0
         errors = 0
@@ -232,6 +246,46 @@ final class ScanModel {
         if !scanner.isCancelled {
             Self.rememberTotal(result.totalBytes, for: scanner.rootPath)
         }
+        startMonitoring(result.tree, rootPath: scanner.rootPath)
+    }
+
+    // MARK: - External deletions
+
+    private func startMonitoring(_ tree: FileTree, rootPath: String) {
+        let monitor = DeletionMonitor(tree: tree, rootPath: rootPath) { [weak self] gone in
+            guard let self, self.tree === tree else { return }
+            // Our own deletion removes files before their folders leave the tree; that isn't
+            // "deleted elsewhere".
+            if let run = self.deletionRun {
+                let deleting = Set(run.items.map(\.node))
+                self.gone = gone.filter { !tree.ancestry(of: $0).contains(where: deleting.contains) }
+            } else {
+                self.gone = gone
+            }
+        }
+        monitor.start()
+        self.monitor = monitor
+    }
+
+    private func stopMonitoring() {
+        monitor?.stop()
+        monitor = nil
+        gone = []
+    }
+
+    /// Whether `node` or a folder containing it was deleted outside the app.
+    func isGone(_ node: Int32) -> Bool {
+        guard !gone.isEmpty, let tree else { return false }
+        return tree.ancestry(of: node).contains { gone.contains($0) }
+    }
+
+    /// The gone items and their size, counting nested ones once.
+    var goneSummary: (count: Int, bytes: Int64) {
+        guard let tree, !gone.isEmpty else { return (0, 0) }
+        let outermost = gone.filter { node in
+            !tree.isRemoved(node) && !tree.ancestry(of: node).dropLast().contains { gone.contains($0) }
+        }
+        return (outermost.count, outermost.reduce(0) { $0 + tree.nodes[Int($1)].size })
     }
 
     private func updateProgress(from scanner: DiskScanner) {
@@ -361,49 +415,101 @@ final class ScanModel {
         collected.removeAll { $0 == node }
     }
 
+    /// Keeps `node` out of the deletion: a collected item is removed; something inside a
+    /// collected folder is split out, by collecting that folder's other contents instead,
+    /// level by level down to `node`; a folder above collected items drops them all.
+    func exclude(_ node: Int32) {
+        guard let tree else { return }
+        let ancestry = tree.ancestry(of: node)
+        guard let top = collected.first(where: { ancestry.contains($0) }) else {
+            collected.removeAll { tree.ancestry(of: $0).contains(node) }
+            return
+        }
+        collected.removeAll { $0 == top }
+        for (parent, keep) in zip(ancestry.drop { $0 != top }, ancestry.drop { $0 != top }.dropFirst()) {
+            collected.append(contentsOf: tree.children(of: parent).filter { $0 != keep })
+        }
+    }
+
     func clearCollector() {
         collected = []
     }
 
+    /// Stops a running deletion soon; what is already deleted stays deleted.
+    func cancelDeletion() {
+        deletionRun?.cancel()
+    }
+
     func deleteCollected(mode: DeletionMode) {
-        guard let tree, !collected.isEmpty, !isDeleting else { return }
-        isDeleting = true
-        let items = collected.map { (node: $0, url: URL(fileURLWithPath: tree.path(of: $0))) }
+        guard let tree, !collected.isEmpty, deletion == nil else { return }
+        let items = collected.map { node in
+            CollectorDeletion.Item(node: node, path: tree.path(of: node), bytes: tree.nodes[Int(node)].size)
+        }
+        let run = CollectorDeletion(mode: mode, items: items, tree: tree)
+        deletionRun = run
+        var progress = DeletionProgress(mode: mode, total: items.count,
+                                        totalBytes: items.reduce(0) { $0 + $1.bytes }, current: "")
+        deletion = progress
+        run.start()
 
+        // Poll rather than be called: the UI updates 10 times a second however fast the
+        // workers go, and redraws once per update for everything deleted since the last one.
         Task {
-            // File operations can take a while (permanent deletes of big folders), so run them off
-            // the main thread and apply the results to the tree afterwards.
-            let failures = await Task.detached(priority: .userInitiated) {
-                var failures: [(node: Int32, message: String)] = []
-                for item in items {
-                    do {
-                        switch mode {
-                        case .trash: try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
-                        case .permanent: try FileManager.default.removeItem(at: item.url)
-                        }
-                    } catch {
-                        failures.append((item.node, "\(item.url.lastPathComponent): \(error.localizedDescription)"))
-                    }
-                }
-                return failures
-            }.value
-
-            let failed = Set(failures.map(\.node))
-            for item in items where !failed.contains(item.node) {
-                tree.remove(item.node)
+            var snapshot = run.snapshot()
+            while true {
+                progress.done = snapshot.doneItems
+                progress.failed = snapshot.failedItems
+                progress.doneBytes = min(snapshot.doneBytes, progress.totalBytes)
+                progress.current = displayPath(snapshot.current)
+                deletion = progress
+                var removed = snapshot.removed
+                applyDeletions(&removed, from: tree)
+                if snapshot.finished { break }
+                try? await Task.sleep(for: .milliseconds(100))
+                snapshot = run.snapshot()
             }
-            collected = items.map(\.node).filter { failed.contains($0) }
-            deletionErrors = failures.map(\.message)
-            isDeleting = false
-
-            // Re-center if the current folder was deleted, then redraw with the new sizes.
-            while center != 0 && tree.isRemoved(center) { center = tree.nodes[Int(center)].parent }
-            hovered = nil
-            transition = nil
-            self.tree = tree
-            // Permanent deletes free space right away.
-            if let volume = scannedVolume { scannedVolume = Self.refreshed(volume) }
-            segments = layout(center: center)
+            deletionErrors = snapshot.failures
+            deletion = nil
+            deletionRun = nil
+            // Trash moves and permanent deletes change free space.
+            if self.tree === tree, let volume = scannedVolume { scannedVolume = Self.refreshed(volume) }
         }
     }
+
+    /// A path relative to the scanned folder, for progress text.
+    func displayPath(_ path: String) -> String {
+        guard let rootPath else { return path }
+        if path == rootPath { return rootName }
+        guard path.hasPrefix(rootPath + "/") else { return path }
+        return String(path.dropFirst(rootPath.count + 1))
+    }
+
+    /// Takes deleted items out of the tree and the collector, and redraws once for all of them.
+    private func applyDeletions(_ nodes: inout [Int32], from tree: FileTree) {
+        guard !nodes.isEmpty else { return }
+        defer { nodes.removeAll() }
+        // A new scan replaced the tree in the meantime; nothing to update.
+        guard self.tree === tree else { return }
+        for node in nodes { tree.remove(node) }
+        let removed = Set(nodes)
+        collected.removeAll { removed.contains($0) }
+
+        // Re-center if the current folder was deleted, then redraw with the new sizes.
+        while center != 0 && tree.isRemoved(center) { center = tree.nodes[Int(center)].parent }
+        hovered = nil
+        transition = nil
+        self.tree = tree
+        segments = layout(center: center)
+    }
+}
+
+/// Progress of deleting the collector, shown in its panel.
+struct DeletionProgress {
+    let mode: ScanModel.DeletionMode
+    let total: Int
+    let totalBytes: Int64
+    var done = 0
+    var failed = 0
+    var doneBytes: Int64 = 0
+    var current: String
 }

@@ -69,6 +69,7 @@ struct SunburstView: View {
         guard let tree = model.tree else { return }
         let hoveredChain = model.hovered.map { Set(tree.ancestry(of: $0)) } ?? []
         let collected = Set(model.collected)
+        let gone = model.gone
         func drawSegment(_ segment: Segment, start: Double, end: Double, depth: Double, opacity: Double) {
             guard opacity > 0.01 else { return }
             if let special = segment.special {
@@ -78,9 +79,11 @@ struct SunburstView: View {
             }
             // Items in the collector (and everything inside them) are dimmed.
             let dimmed = !collected.isEmpty && tree.ancestry(of: segment.node).contains { collected.contains($0) }
+            // Deleted by another app since the scan: gray until the next scan.
+            let isGone = !gone.isEmpty && tree.ancestry(of: segment.node).contains { gone.contains($0) }
             draw(segment.node, hue: segment.hue, start: start, end: end, depth: depth,
                  opacity: dimmed ? opacity * 0.3 : opacity,
-                 highlighted: hoveredChain.contains(segment.node), tree: tree,
+                 highlighted: hoveredChain.contains(segment.node), gone: isGone, tree: tree,
                  in: &context, geometry: geometry)
         }
 
@@ -123,11 +126,13 @@ struct SunburstView: View {
 
     /// `depth` is fractional during animations; rings that move past the edge are clipped.
     private func draw(_ index: Int32, hue: Double, start: Double, end: Double, depth: Double, opacity: Double,
-                      highlighted: Bool, tree: FileTree,
+                      highlighted: Bool, gone: Bool, tree: FileTree,
                       in context: inout GraphicsContext, geometry: SunburstGeometry) {
         guard let path = geometry.wedge(start: start, end: end, depth: depth) else { return }
         let node = tree.nodes[Int(index)]
-        let fill = Self.color(hue: hue, depth: depth, isDirectory: node.isDirectory, highlighted: highlighted)
+        let fill = gone
+            ? Color(white: highlighted ? 0.55 : 0.42)
+            : Self.color(hue: hue, depth: depth, isDirectory: node.isDirectory, highlighted: highlighted)
         context.fill(path, with: .color(fill.opacity(opacity)))
         context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor).opacity(opacity)), lineWidth: 0.75)
     }
@@ -243,7 +248,11 @@ private struct CenterLabel: View {
                     .font(.title3.monospacedDigit().weight(.semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
-                if node.isDirectory {
+                if model.isGone(model.focused) {
+                    Text("deleted outside DirSizes")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if node.isDirectory {
                     Text("\(node.itemCount.formatted()) files")
                         .font(.caption)
                         .foregroundStyle(.secondary)

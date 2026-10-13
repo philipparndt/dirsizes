@@ -88,7 +88,6 @@ public final class DiskScanner: @unchecked Sendable {
         treeLock.lock()
         frozen = true
         tree.finalize()
-        tree.buildChildIndex()
         treeLock.unlock()
         return ScanResult(tree: tree,
                           files: filesScanned.load(ordering: .relaxed),
