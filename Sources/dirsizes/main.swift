@@ -6,12 +6,16 @@ let usage = """
       dirsizes scan  <path> [--threads N] [--top N] [--cross-devices]
       dirsizes bench <path> [--runs N] [--skip fm,fts,du]
       dirsizes mcp
+      dirsizes leftovers [--all]
 
     scan   Scan <path> with the parallel getattrlistbulk scanner and print the largest entries.
     bench  Compare the scanner (1 thread and N threads) against FileManager, fts and du.
            Runs are warm-cache; run `sudo purge` first for a cold-cache number.
     mcp    MCP server on stdio for AI clients, forwarding to the DirSizes app (started if needed).
            Lets the AI scan, explore and fill the collector; it cannot delete anything.
+    leftovers  List data in ~/Library and /Library left behind by apps that are no longer
+           installed. --all also lists entries worth checking (vendor still installed, or named
+           like an app). Deletes nothing.
     """
 
 func formatBytes(_ bytes: Int64) -> String {
@@ -164,6 +168,34 @@ func runBench(_ options: Options) {
     }
 }
 
+// MARK: - leftovers
+
+func runLeftovers(all: Bool) {
+    let installed = InstalledApps.discover()
+    // An app's data in both Library folders goes into one group.
+    var groups: [String: (leftover: Leftover, paths: [(String, Int64)])] = [:]
+    for library in [NSHomeDirectory() + "/Library", "/Library"] {
+        let tree = DiskScanner(path: library).scan().tree
+        for leftover in LeftoverFinder.find(in: tree, libraries: [tree.path(of: 0)], installed: installed) {
+            var group = groups[leftover.id] ?? (Leftover(id: leftover.id, name: leftover.name, confidence: leftover.confidence, items: [], size: 0), [])
+            group.leftover.confidence = min(group.leftover.confidence, leftover.confidence)
+            group.leftover.size += leftover.size
+            group.paths += leftover.items.map { (tree.path(of: $0), tree.nodes[Int($0)].size) }
+            groups[leftover.id] = group
+        }
+    }
+    print("\(installed.identifiers.count) installed apps")
+    for (leftover, paths) in groups.values.sorted(by: { $0.leftover.size > $1.leftover.size })
+    where all || leftover.confidence == .likely {
+        let mark = leftover.confidence == .likely ? "" : "  (check)"
+        let name = leftover.name == leftover.id ? leftover.id : "\(leftover.name) (\(leftover.id))"
+        print(formatBytes(leftover.size).leftPad(10) + "  " + name + mark)
+        for (path, size) in paths.sorted(by: { $0.1 > $1.1 }) {
+            print(String(repeating: " ", count: 14) + formatBytes(size).leftPad(10) + "  " + path)
+        }
+    }
+}
+
 extension String {
     func leftPad(_ width: Int) -> String {
         count >= width ? " " + self : String(repeating: " ", count: width - count) + self
@@ -171,6 +203,10 @@ extension String {
 }
 
 if CommandLine.arguments.dropFirst().first == "mcp" { runMCPBridge() }
+if CommandLine.arguments.dropFirst().first == "leftovers" {
+    runLeftovers(all: CommandLine.arguments.contains("--all"))
+    exit(0)
+}
 
 let options = parseOptions()
 switch options.command {

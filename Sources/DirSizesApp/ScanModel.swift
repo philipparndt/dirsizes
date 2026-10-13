@@ -64,6 +64,12 @@ final class ScanModel {
     private(set) var collected: [Int32] = []
     /// The collector fills the window for reviewing (chart and tree of what will be deleted).
     var showsCollectorReview = false
+    var showsCleanup = false
+    /// Leftovers of uninstalled apps in the scan; nil until looked for.
+    private(set) var leftovers: [Leftover]?
+    private(set) var findingLeftovers = false
+    private var installedApps: InstalledApps?
+    private var isDemo = false
     /// The Full Disk Access sheet is up; `pendingScan` runs once it is answered.
     var asksForFullDiskAccess = false
     private var pendingScan: (() -> Void)?
@@ -130,6 +136,8 @@ final class ScanModel {
         transition = nil
         collected = []
         showsCollectorReview = false
+        showsCleanup = false
+        leftovers = nil
         hovered = nil
         hoveredSpecial = nil
         loadVolumes()
@@ -225,6 +233,8 @@ final class ScanModel {
     func showDemo() {
         showStart()
         let tree = FileTree.demo()
+        isDemo = true
+        installedApps = .demo
         rootPath = tree.path(of: 0)
         self.tree = tree
         filesScanned = Int(tree.root.itemCount)
@@ -237,6 +247,10 @@ final class ScanModel {
     }
 
     private func startScan(path: String) {
+        if isDemo {
+            isDemo = false
+            installedApps = nil
+        }
         scanner?.cancel()
         pollTask?.cancel()
 
@@ -254,6 +268,8 @@ final class ScanModel {
         transition = nil
         collected = []
         showsCollectorReview = false
+        showsCleanup = false
+        leftovers = nil
         filesScanned = 0
         bytesScanned = 0
         errors = 0
@@ -418,6 +434,60 @@ final class ScanModel {
         tree.map { URL(fileURLWithPath: $0.path(of: node)) }
     }
 
+    // MARK: - Cleanup
+
+    private static let dataVolume = "/System/Volumes/Data"
+
+    /// The Library folders (yours and the Mac's) the scan covers.
+    var scannedLibraries: [String] {
+        guard let tree else { return [] }
+        if isDemo { return [tree.path(of: 0) + "/Library"] }
+        return [NSHomeDirectory() + "/Library", "/Library"].compactMap { path in
+            [path, Self.dataVolume + path].first { tree.node(atPath: $0) != nil }
+        }
+    }
+
+    func showCleanup() {
+        showsCollectorReview = false
+        showsCleanup = true
+        findLeftovers()
+    }
+
+    /// Looks for leftovers in the scan, again whenever asked: the installed apps are looked up
+    /// once, the scan's Library folders are quick to go through.
+    func findLeftovers() {
+        guard let tree, !findingLeftovers else { return }
+        let libraries = scannedLibraries
+        guard !libraries.isEmpty else {
+            leftovers = []
+            return
+        }
+        if let installedApps {
+            leftovers = tree.read { LeftoverFinder.find(in: $0, libraries: libraries, installed: installedApps) }
+            return
+        }
+        findingLeftovers = true
+        Task.detached(priority: .userInitiated) {
+            let installed = InstalledApps.discover()
+            let found = tree.read { LeftoverFinder.find(in: $0, libraries: libraries, installed: installed) }
+            await MainActor.run {
+                self.installedApps = installed
+                self.findingLeftovers = false
+                if self.tree === tree { self.leftovers = found }
+            }
+        }
+    }
+
+    /// Like `displayPath`, but home-relative ("~/Library/Caches/…"), for paths in Library folders.
+    func libraryPath(_ node: Int32) -> String {
+        guard let tree else { return "" }
+        var path = tree.path(of: node)
+        if path.hasPrefix(Self.dataVolume + "/") { path.removeFirst(Self.dataVolume.count) }
+        let home = isDemo ? tree.path(of: 0) : NSHomeDirectory()
+        if path.hasPrefix(home + "/") { path = "~" + path.dropFirst(home.count) }
+        return path
+    }
+
     // MARK: - Collector
 
     enum DeletionMode {
@@ -539,6 +609,7 @@ final class ScanModel {
         transition = nil
         self.tree = tree
         segments = layout(center: center)
+        if leftovers != nil { findLeftovers() }
     }
 }
 

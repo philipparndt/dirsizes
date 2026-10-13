@@ -22,12 +22,17 @@ and a collector to clean it up.
   collected folder before deleting.
 - **Fast permanent delete.** Uses the scan to delete many files in parallel, several times
   faster than `rm -rf` on folders with tens of thousands of files.
+- **Leftovers of uninstalled apps.** The Cleanup view (💡 in the toolbar) lists caches,
+  settings, containers and launch agents in `~/Library` and `/Library` that belong to apps no
+  longer on your Mac, grouped by app. Entries that may still belong to something installed
+  are marked "Check". Collect what you want gone and delete it from the collector.
 - **Live updates.** Items deleted by other apps after the scan turn gray, so you can see
   what is already gone without scanning again.
 - **MCP server.** An AI assistant can scan, explore the results and put items in the
   collector for you to review. It can't delete anything.
 - **Command-line scanner.** `dirsizes scan` prints the largest entries. `dirsizes bench`
-  compares the scanner with `FileManager`, `fts` and `du`.
+  compares the scanner with `FileManager`, `fts` and `du`. `dirsizes leftovers` lists what
+  uninstalled apps left behind.
 
 ## Install
 
@@ -63,6 +68,7 @@ to Claude Code, with a Copy button. With the Homebrew cask that is:
 
 ```sh
 claude mcp add --scope user dirsizes -- dirsizes mcp
+dirsizes leftovers [--all]
 ```
 
 For other clients, configure a stdio server that runs `dirsizes mcp`:
@@ -87,6 +93,7 @@ random loopback port with a token that changes every launch, written to
 | `list` | Contents of a folder, largest first |
 | `largest` | Largest files or folders anywhere below a folder |
 | `search` | Find by name or glob, e.g. every `node_modules` with its total |
+| `leftovers` | Data left behind by uninstalled apps, grouped by app, with a confidence |
 | `collector`, `collect`, `uncollect`, `clear_collector` | Read and change the collector (never deletes) |
 
 ## Command line

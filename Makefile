@@ -26,6 +26,10 @@ SWIFTC    ?= xcrun swiftc
 # UNIVERSAL=1 builds arm64 and x86_64 in one go; releases always do.
 UNIVERSAL ?=
 ARCH_FLAGS = $(if $(UNIVERSAL),--arch arm64 --arch x86_64)
+# SwiftPM records the deployment target as the SDK version, so macOS treats the app as built
+# for macOS 15 and draws it in the old style (gray toolbar icons). Record the real SDK.
+SDK_VERSION := $(shell xcrun --show-sdk-version)
+LINK_FLAGS = -Xlinker -platform_version -Xlinker macos -Xlinker 15.0 -Xlinker $(SDK_VERSION)
 
 BIN_DIR    = $(shell $(SWIFT) build -c $(CONFIG) $(ARCH_FLAGS) --show-bin-path)
 APP_NAME   = DirSizes
@@ -41,7 +45,7 @@ ICON       = Resources/AppIcon.icns
 all: build
 
 build:
-	$(SWIFT) build -c $(CONFIG) $(ARCH_FLAGS)
+	$(SWIFT) build -c $(CONFIG) $(ARCH_FLAGS) $(LINK_FLAGS)
 
 # Runs the binary inside the bundle so the Dock shows the app icon.
 run: app

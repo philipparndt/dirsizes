@@ -177,6 +177,44 @@ final class DirSizesMCP {
             return json(result)
         }
 
+        tool("leftovers", """
+            Data left behind by apps that are no longer installed (caches, preferences, containers, \
+            saved state, launch agents in ~/Library and /Library), grouped by app, largest first. \
+            Needs a scan that covers the home folder or the startup disk. Confidence "likely": \
+            named after an app that isn't installed, with data only apps write. "check": may \
+            still belong to something installed (an app by the same vendor, a command-line tool); \
+            tell the user rather than collecting these without asking. Pass items to collect.
+            """,
+             properties: [
+                "include_check": ["type": "boolean", "description": "Also list \"check\" entries (default true)."],
+                "limit": ["type": "integer", "description": "Maximum groups (default 50)."],
+             ]) { [unowned self] args in
+            let tree = try requireTree()
+            guard !model.scannedLibraries.isEmpty else {
+                throw MCPServer.ToolError("The scan covers no Library folder. Scan the home folder (~) or the startup disk (/) first.")
+            }
+            model.findLeftovers()
+            while model.findingLeftovers {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            let includeCheck = args["include_check"] as? Bool ?? true
+            let groups = (model.leftovers ?? []).filter { includeCheck || $0.confidence == .likely }
+            let limit = int(args["limit"]) ?? 50
+            return json([
+                "groups": groups.prefix(limit).map { group -> [String: Any] in
+                    [
+                        "app": group.name,
+                        "identifier": group.id,
+                        "confidence": group.confidence == .likely ? "likely" : "check",
+                        "size": sizeInfo(group.size),
+                        "items": group.items.map { entry($0, in: tree) },
+                    ]
+                },
+                "more_groups": max(groups.count - limit, 0),
+                "total_size": sizeInfo(groups.reduce(0) { $0 + $1.size }),
+            ])
+        }
+
         tool("collector", "Items in the collector, which the user can move to the Trash from the app.",
              properties: [:]) { [unowned self] _ in
             json(collectorInfo())

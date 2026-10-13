@@ -81,9 +81,29 @@ private let demoHome: [DemoEntry] = [
             .filler("Homebrew", 4 * GB, depth: 2),
             .filler("pip", 2 * GB, depth: 2),
             .filler("Google", 3 * GB, depth: 2),
+            // Left behind by uninstalled apps, for the cleanup view.
+            .filler("com.lumen.VideoStudio", 3 * GB, depth: 2),
         ]),
-        .filler("Containers", 17 * GB, depth: 3),
-        .filler("Application Support", 12 * GB, depth: 3),
+        .dir("Containers", [
+            .filler("com.apple.mail", 13 * GB, depth: 3),
+            .filler("net.brightpixel.PhotoLab", 4 * GB, depth: 2),
+        ]),
+        .dir("Application Support", [
+            .filler("Code", 7 * GB, depth: 3),
+            .filler("MobileSync", 4 * GB, depth: 2),
+            .filler("VideoStudio", 1400 * MB, depth: 2),
+            .filler("io.syncbox.agent", 600 * MB, depth: 1),
+            .filler("Retroverse", 300 * MB, depth: 1),
+        ]),
+        .dir("Saved Application State", [
+            .dir("com.lumen.VideoStudio.savedState", [.file("windows.plist", 40_000)]),
+        ]),
+        .dir("Preferences", [
+            .file("com.apple.finder.plist", 30_000),
+            .file("com.lumen.VideoStudio.plist", 12_000),
+            .file("net.brightpixel.PhotoLab.plist", 8_000),
+            .file("io.syncbox.agent.plist", 4_096),
+        ]),
         .filler("Mail", 5 * GB, depth: 2),
     ]),
     .dir("dev", [
@@ -139,4 +159,14 @@ private struct SeededRandom {
         z ^= z >> 31
         return Int(z % UInt64(upperBound))
     }
+}
+
+extension InstalledApps {
+    /// The apps "installed" alongside the demo home folder.
+    public static let demo: InstalledApps = {
+        var apps = InstalledApps()
+        apps.add(identifier: "com.microsoft.VSCode", names: ["Code", "Visual Studio Code"])
+        apps.add(identifier: "io.syncbox.desktop", names: ["Syncbox"])
+        return apps
+    }()
 }

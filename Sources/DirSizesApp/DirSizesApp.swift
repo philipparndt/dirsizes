@@ -32,6 +32,7 @@ struct DirSizesApp: App {
                     let defaults = UserDefaults.standard
                     if model.phase == .idle, defaults.bool(forKey: "demo") {
                         model.showDemo()
+                        if defaults.bool(forKey: "cleanup") { model.showCleanup() }
                     } else if model.phase == .idle, let path = defaults.string(forKey: "path") {
                         model.open(path: path)
                     } else if defaults.string(forKey: "screenshot") == nil {

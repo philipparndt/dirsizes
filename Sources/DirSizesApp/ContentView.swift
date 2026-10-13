@@ -13,6 +13,8 @@ struct ContentView: View {
                 EmptyState()
             } else if model.showsCollectorReview {
                 CollectorReviewView()
+            } else if model.showsCleanup {
+                CleanupView()
             } else {
                 HSplitView {
                     VStack(spacing: 0) {
@@ -61,6 +63,9 @@ struct ContentView: View {
                         .disabled(model.rootPath == nil)
                 }
                 Button("Open…", systemImage: "folder") { model.chooseFolder() }
+                Button("Cleanup", systemImage: "lightbulb") { model.showCleanup() }
+                    .help("Find data left behind by uninstalled apps")
+                    .disabled(model.tree == nil || model.phase == .scanning)
                 Button("Use with Claude", systemImage: "sparkles") { showsMCPSetup.toggle() }
                     .help("Connect Claude Code to DirSizes")
                     .popover(isPresented: $showsMCPSetup, arrowEdge: .bottom) { MCPSetupView() }
