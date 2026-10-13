@@ -20,6 +20,9 @@ VERSION="${VERSION#v}"
 TAG="v$VERSION"
 DMG="build/DirSizes-$VERSION.dmg"
 NOTES_FILE="docs/release-notes-$VERSION.md"
+# Explicit, so gh doesn't have to guess the repository from the remote (it can't when
+# another GitHub host is configured).
+REPO="${DIRSIZES_REPO:-philipparndt/dirsizes}"
 
 command -v gh >/dev/null || { echo "gh is not installed: brew install gh"; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "gh is not logged in: gh auth login"; exit 1; }
@@ -79,7 +82,7 @@ NOTES=$(mktemp)
 	echo "Requires macOS 15 or newer, Apple silicon or Intel."
 } > "$NOTES"
 
-gh release create "$TAG" "$DMG" "$DMG.sha256" \
+gh release create "$TAG" "$DMG" "$DMG.sha256" --repo "$REPO" \
 	--title "DirSizes $VERSION" \
 	--notes-file "$NOTES"
 rm -f "$NOTES"
@@ -88,4 +91,4 @@ rm -f "$NOTES"
 Scripts/update-tap.sh "$VERSION"
 
 echo "==> Published $TAG"
-gh release view "$TAG" --json url --jq .url
+gh release view "$TAG" --repo "$REPO" --json url --jq .url
