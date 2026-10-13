@@ -169,6 +169,22 @@ final class ScanModel {
         scanner?.cancel()
     }
 
+    /// Shows a made-up home folder as if it had been scanned, for screenshots (`-demo YES`).
+    /// Its paths don't exist, so revealing or deleting from it does nothing useful.
+    func showDemo() {
+        showStart()
+        let tree = FileTree.demo()
+        rootPath = tree.path(of: 0)
+        self.tree = tree
+        filesScanned = Int(tree.root.itemCount)
+        duration = .milliseconds(1840)
+        phase = .done
+        segments = layout(center: 0)
+        for path in ["Library/Developer/Xcode/DerivedData", "dev/web-shop/node_modules", "Downloads/Xcode_27.xip"] {
+            if let node = tree.node(atPath: tree.path(of: 0) + "/" + path) { collect(node) }
+        }
+    }
+
     func scan(path: String) {
         scanner?.cancel()
         pollTask?.cancel()
