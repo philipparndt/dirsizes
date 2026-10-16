@@ -70,7 +70,7 @@ struct ContentView: View {
                 }
                 Button("Open…", systemImage: "folder") { model.chooseFolder() }
                 Button("Cleanup", systemImage: "lightbulb") { model.showCleanup() }
-                    .help("Find data left behind by uninstalled apps, apps you no longer use, developer caches, old downloads, and what grew since an earlier scan")
+                    .help("Find what uninstalled apps left behind, unused apps, developer caches, old downloads, duplicates, and what grew since an earlier scan")
                     .disabled(model.tree == nil || model.phase == .scanning)
                 Button("Use with Claude", systemImage: "sparkles") { showsMCPSetup.toggle() }
                     .help("Connect Claude Code to DirSizes")

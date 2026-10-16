@@ -119,7 +119,17 @@ final class ScanModel {
     /// What changed since the snapshot at `base`.
     private(set) var sizeChanges: (base: URL, total: (old: Int64, new: Int64), changes: [SizeChange])?
     private(set) var findingSizeChanges = false
-    private var installedApps: InstalledApps?
+    /// Duplicate files in the scan; nil until looked for. Set in ScanModel+Duplicates.swift,
+    /// as are the running search and its progress.
+    var duplicates: [DuplicateGroup]?
+    var duplicateSearch: DuplicateSearch?
+    var duplicateProgress = DuplicateSearch.Progress()
+    /// The smallest files `duplicates` compared.
+    var duplicatesMinimumSize: Int64 = 0
+    /// Launch agents and daemons of removed apps; nil until looked for (ScanModel+StartupItems.swift).
+    var startupItems: [StartupItem]?
+    var findingStartupItems = false
+    private(set) var installedApps: InstalledApps?
     private var isDemo = false
     /// The Full Disk Access sheet is up; `pendingScan` runs once it is answered.
     var asksForFullDiskAccess = false
@@ -320,6 +330,8 @@ final class ScanModel {
         oldFiles = nil
         sizeSnapshots = nil
         sizeChanges = nil
+        resetDuplicates()
+        startupItems = nil
         hovered = nil
         hoveredSpecial = nil
         loadVolumes()
@@ -492,6 +504,8 @@ final class ScanModel {
         oldFiles = nil
         sizeSnapshots = nil
         sizeChanges = nil
+        resetDuplicates()
+        startupItems = nil
         filesScanned = 0
         bytesScanned = 0
         errors = 0
@@ -1120,6 +1134,8 @@ final class ScanModel {
         if developerCaches != nil { findDeveloperCaches() }
         if oldFiles != nil { findOldFiles() }
         if let sizeChanges { findSizeChanges(since: sizeChanges.base) }
+        duplicates = duplicates?.compactMap { $0.remaining(in: tree) }
+        if startupItems != nil { findStartupItems() }
     }
 }
 

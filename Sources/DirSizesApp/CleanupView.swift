@@ -1,12 +1,12 @@
 import DirScanner
 import SwiftUI
 
-/// Cleanup suggestions from the scan: data left behind by apps that are no longer installed,
-/// apps that haven't been used for a while, developer caches, and old downloads and backups. Suggestions only go into the collector;
-/// deleting stays with the collector.
+/// Cleanup suggestions from the scan, by kind in a sidebar: what uninstalled apps left behind,
+/// apps not used for a while, developer caches, old downloads, duplicates, and what grew since
+/// an earlier scan. Suggestions only go into the collector; deleting stays with the collector.
 struct CleanupView: View {
     enum Tab: String {
-        case leftBehind, unusedApps, developer, oldFiles, changes
+        case leftBehind, unusedApps, developer, oldFiles, changes, duplicates, startupItems
     }
 
     @Environment(ScanModel.self) private var model
@@ -16,6 +16,7 @@ struct CleanupView: View {
     @AppStorage("developerProjectMonths") private var projectMonths = 3
     @AppStorage("developerGroupsByKind") private var groupsByKind = false
     @AppStorage("oldFilesMonths") private var oldFilesMonths = 3
+    @AppStorage("duplicatesMinimumSize") private var duplicatesMinimumSize = 1_000_000
     @State private var selection = Set<CleanupRow.ID>()
     @FocusState private var listFocused: Bool
 
@@ -26,16 +27,6 @@ struct CleanupView: View {
                 Divider().frame(height: 16)
                 Label("Cleanup", systemImage: "lightbulb")
                     .font(.headline)
-                Picker("", selection: $tab) {
-                    Text("Left Behind").tag(Tab.leftBehind)
-                    Text("Unused Apps").tag(Tab.unusedApps)
-                    Text("Developer").tag(Tab.developer)
-                    Text("Old Files").tag(Tab.oldFiles)
-                    Text("Changes").tag(Tab.changes)
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                .labelsHidden()
                 Spacer()
                 switch tab {
                 case .leftBehind:
@@ -88,24 +79,31 @@ struct CleanupView: View {
                         }
                         .fixedSize()
                     }
+                case .duplicates:
+                    Picker("At least", selection: $duplicatesMinimumSize) {
+                        Text("100 KB").tag(100_000)
+                        Text("1 MB").tag(1_000_000)
+                        Text("10 MB").tag(10_000_000)
+                        Text("100 MB").tag(100_000_000)
+                        Text("1 GB").tag(1_000_000_000)
+                    }
+                    .fixedSize()
+                    .help("Smaller files aren't compared")
+                case .startupItems:
+                    Toggle("Show entries to check", isOn: $showsCheck)
+                        .toggleStyle(.checkbox)
+                        .help("Also list items that may still belong to something installed")
                 }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             Divider()
 
-            Group {
-                switch tab {
-                case .leftBehind: content
-                case .unusedApps: UnusedAppsList(months: months)
-                case .developer: developer
-                case .oldFiles: oldFiles
-                case .changes: ChangesList()
-                }
+            HStack(spacing: 0) {
+                sidebar
+                Divider()
+                tabContent
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onAppear(perform: load)
-            .onChange(of: tab, load)
 
             Divider()
             HStack {
@@ -122,10 +120,48 @@ struct CleanupView: View {
         .onExitCommand { model.showsCleanup = false }
     }
 
+    private var sidebar: some View {
+        List(selection: Binding<Tab?>(get: { tab }, set: { if let new = $0 { tab = new } })) {
+            Section("Apps") {
+                Label("Left Behind", systemImage: "shippingbox").tag(Tab.leftBehind)
+                Label("Unused Apps", systemImage: "app.dashed").tag(Tab.unusedApps)
+                Label("Startup Items", systemImage: "power").tag(Tab.startupItems)
+            }
+            Section("Files") {
+                Label("Developer", systemImage: "hammer").tag(Tab.developer)
+                Label("Old Files", systemImage: "clock.arrow.circlepath").tag(Tab.oldFiles)
+                Label("Duplicates", systemImage: "doc.on.doc").tag(Tab.duplicates)
+            }
+            Section("Over Time") {
+                Label("Changes", systemImage: "chart.line.uptrend.xyaxis").tag(Tab.changes)
+            }
+        }
+        .listStyle(.sidebar)
+        .frame(width: 180)
+    }
+
+    private var tabContent: some View {
+            Group {
+                switch tab {
+                case .leftBehind: content
+                case .unusedApps: UnusedAppsList(months: months)
+                case .developer: developer
+                case .oldFiles: oldFiles
+                case .changes: ChangesList()
+                case .duplicates: DuplicatesList(minimumSize: Int64(duplicatesMinimumSize))
+                case .startupItems: StartupItemsList(showsCheck: showsCheck)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onAppear(perform: load)
+            .onChange(of: tab, load)
+    }
+
     /// Looks for the tab's suggestions the first time it's shown.
     private func load() {
         switch tab {
-        case .leftBehind: break
+        // They look on their own when shown.
+        case .leftBehind, .duplicates, .startupItems: break
         case .unusedApps: if model.unusedApps == nil { model.findUnusedApps() }
         case .developer: if model.developerCaches == nil { model.findDeveloperCaches() }
         case .oldFiles: if model.oldFiles == nil { model.findOldFiles() }
