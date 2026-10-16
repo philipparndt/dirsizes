@@ -27,6 +27,9 @@ struct SuggestionsList<Header: View>: View {
             header()
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
+            SelectionBar(selected: nodes(for: selection), all: shown.flatMap(\.suggestions).flatMap(\.items))
+                .padding(.horizontal, 16)
+                .padding(.bottom, 4)
             if shown.isEmpty {
                 ContentUnavailableView("Nothing older", systemImage: "checkmark.seal",
                                        description: Text("Nothing here is older than the chosen time."))
@@ -121,6 +124,39 @@ struct SuggestionsList<Header: View>: View {
         } else {
             nodes.forEach(model.collect)
         }
+    }
+}
+
+/// How much is selected and how much of the list is in the collector, with a button to add
+/// the selection.
+struct SelectionBar: View {
+    @Environment(ScanModel.self) private var model
+    let selected: [Int32]
+    let all: [Int32]
+
+    var body: some View {
+        let selected = Set(selected)
+        let collected = Set(all.filter(model.isCollected))
+        HStack(spacing: 12) {
+            Text(selected.isEmpty ? "Nothing selected"
+                 : "\(selected.count) selected · \(formatBytes(size(of: selected)))")
+                .monospacedDigit()
+            Text("In the collector: \(formatBytes(size(of: collected)))")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Spacer()
+            Button("Add Selected") { selected.forEach(model.collect) }
+                .disabled(selected.isEmpty || model.isDeleting || selected.allSatisfy(model.isCollected))
+                .help("Space adds or removes the selected rows")
+        }
+        .font(.callout)
+    }
+
+    /// Counts what's inside another of the nodes once.
+    private func size(of nodes: Set<Int32>) -> Int64 {
+        guard let tree = model.tree else { return 0 }
+        return nodes.filter { !tree.ancestry(of: $0).dropLast().contains(where: nodes.contains) }
+            .reduce(0) { $0 + tree.nodes[Int($1)].size }
     }
 }
 

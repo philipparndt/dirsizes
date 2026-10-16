@@ -14,6 +14,10 @@ struct ChangesList: View {
                     header(date: base.date, total: changes.total)
                         .padding(.horizontal, 16)
                         .padding(.top, 8)
+                    SelectionBar(selected: nodes(for: selection, in: changes.changes),
+                                 all: nodes(for: nil, in: changes.changes))
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 4)
                     if changes.changes.isEmpty {
                         ContentUnavailableView("No big changes", systemImage: "equal.circle",
                                                description: Text("Nothing grew or shrank by 50 MB or more."))
@@ -83,11 +87,12 @@ struct ChangesList: View {
         .onAppear { listFocused = true }
     }
 
-    private func nodes(for ids: Set<String>, in changes: [SizeChange]) -> [Int32] {
+    /// The nodes of the changes with `ids`, or of all of them.
+    private func nodes(for ids: Set<String>?, in changes: [SizeChange]) -> [Int32] {
         var result: [Int32] = []
         func visit(_ changes: [SizeChange]) {
             for change in changes {
-                if ids.contains(change.id), let node = change.node { result.append(node) }
+                if ids?.contains(change.id) ?? true, let node = change.node { result.append(node) }
                 visit(change.children ?? [])
             }
         }

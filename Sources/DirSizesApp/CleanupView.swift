@@ -206,9 +206,12 @@ struct CleanupView: View {
                                    description: Text("No data from uninstalled apps was found in the scanned Library folders."))
         } else {
             VStack(spacing: 0) {
-                LeftoversHeader(groups: groups, selected: selectedNodes)
+                LeftoversHeader(groups: groups)
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
+                SelectionBar(selected: selectedNodes, all: groups.flatMap(\.items))
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 4)
                 // Arrows move and expand, Space adds or removes the selection, ⌫ removes it.
                 List(rows, children: \.children, selection: $selection) { row in
                     switch row.id {
@@ -295,7 +298,6 @@ struct CleanupRow: Identifiable {
 private struct LeftoversHeader: View {
     @Environment(ScanModel.self) private var model
     let groups: [Leftover]
-    let selected: [Int32]
 
     var body: some View {
         let likely = groups.filter { $0.confidence == .likely }
@@ -305,9 +307,6 @@ private struct LeftoversHeader: View {
                     .font(.headline)
                     .foregroundStyle(.primary)
                 Spacer()
-                Button("Add Selected") { selected.forEach(model.collect) }
-                    .disabled(selected.isEmpty || model.isDeleting || selected.allSatisfy(model.isCollected))
-                    .help("Space adds or removes the selected rows")
                 Button("Add All Likely (\(formatBytes(likely.reduce(0) { $0 + $1.size })))") {
                     for group in likely { group.items.forEach(model.collect) }
                 }
@@ -416,6 +415,9 @@ private struct UnusedAppsList: View {
                 header
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
+                SelectionBar(selected: selectedNodes, all: apps.flatMap(\.items))
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 4)
                 List(rows, children: \.children, selection: $selection) { row in
                     switch row.id {
                     case .app: UnusedAppRow(app: row.app)
@@ -460,9 +462,6 @@ private struct UnusedAppsList: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                 Spacer()
-                Button("Add Selected") { selectedNodes.forEach(model.collect) }
-                    .disabled(selectedNodes.isEmpty || model.isDeleting || selectedNodes.allSatisfy(model.isCollected))
-                    .help("Space adds or removes the selected rows")
             }
             Text("""
                 Each app with its data in the Library folders, oldest use first. "Opened" is when \
