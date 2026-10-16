@@ -225,7 +225,7 @@ private struct SpecialRow: View {
         switch kind {
         case .free: .secondary
         case .hidden: .gray
-        case .iCloud, .photosOnMac, .photosInCloud: model.color(of: kind) ?? .gray
+        case .iCloud, .photosInCloud: model.color(of: kind) ?? .gray
         }
     }
 
@@ -243,7 +243,6 @@ private struct SpecialRow: View {
             case "docs": "doc.on.doc"
             default: "icloud"
             }
-        case .photosOnMac: "desktopcomputer"
         case .photosInCloud: "icloud"
         }
     }
@@ -269,22 +268,19 @@ private struct SpecialDetails: View {
                 note("In iCloud under Documents, but not as files in iCloud Drive: app data apps keep in iCloud, "
                      + "Recently Deleted, and versions of documents.")
             case .iCloud("photos"):
-                if let library = model.photosLibrary, !library.readable {
-                    note("Can't read \((library.path as NSString).lastPathComponent) to see how much of it is on this Mac: "
+                if let library = model.photosLibrary, library.tree == nil {
+                    note("Can't read \((library.path as NSString).lastPathComponent) to chart what of it is on this Mac: "
                          + "Photos libraries are protected. Allow DirSizes Full Disk Access, then scan again.")
                     Button("Open Full Disk Access Settings") { FullDiskAccess.openSettings() }
                         .buttonStyle(.link)
                     Divider()
-                } else if let library = model.photosLibrary {
-                    detail("Library on this Mac", model.bytes(of: .photosOnMac), icon: "desktopcomputer")
-                    detail("Only in iCloud", model.bytes(of: .photosInCloud), icon: "icloud")
-                    Button("Look inside the library") { model.scan(path: library.path) }
-                        .buttonStyle(.link)
-                    Divider()
                 }
                 PhotosDetails()
-            case .photosOnMac, .photosInCloud:
-                EmptyView()
+            case .photosInCloud:
+                note("What iCloud stores for Photos beyond the library on this Mac (\"Photos on this Mac\"): "
+                     + "originals that aren't downloaded. Can be 0 when everything is downloaded; the library "
+                     + "also holds previews, so it can be larger than what iCloud counts.")
+                PhotosDetails()
             case .iCloud(let key):
                 if let members = familyMembers(for: key) {
                     ForEach(Array(members.enumerated()), id: \.offset) { _, member in

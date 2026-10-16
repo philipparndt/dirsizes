@@ -140,6 +140,7 @@ final class ScanModel {
     func displayName(of node: Int32) -> String {
         guard let tree else { return "" }
         if node == 0 { return rootName }
+        if node == photosLibraryNode { return "Photos on this Mac" }
         if containerNames?.tree != ObjectIdentifier(tree) {
             var names: [Int32: String] = [:]
             let folder = DataVolume.candidates(for: CloudFolder.iCloudPath).lazy.compactMap(tree.node(atPath:)).first
@@ -164,7 +165,8 @@ final class ScanModel {
         if let volume = scannedVolume { return .disk(used: volume.usedBytes, free: volume.availableBytes) }
         if let usage = iCloudUsage {
             return .iCloud(categories: usage.storageUsageByMedia.map { ($0.mediaKey, $0.usageInBytes) },
-                           free: max(usage.storageUsageInfo.totalStorageInBytes - usage.storageUsageInfo.usedStorageInBytes, 0))
+                           free: max(usage.storageUsageInfo.totalStorageInBytes - usage.storageUsageInfo.usedStorageInBytes, 0),
+                           photosOnMac: photosLibraryNode.flatMap { tree?.nodes[Int($0)].size } ?? 0)
         }
         return nil
     }
@@ -178,11 +180,7 @@ final class ScanModel {
     }
 
     func bytes(of special: SpecialSpace) -> Int64 {
-        switch special {
-        case .photosOnMac: return photosSplit?.onMac ?? 0
-        case .photosInCloud: return photosSplit?.inCloud ?? 0
-        default: return (phase == .scanning ? liveExtras : extras).first { $0.0 == special }?.1 ?? 0
-        }
+        (phase == .scanning ? liveExtras : extras).first { $0.0 == special }?.1 ?? 0
     }
 
     /// The name shown for a special segment.
@@ -192,7 +190,6 @@ final class ScanModel {
         case .hidden: phase == .scanning ? "Not scanned yet" : "Hidden space"
         case .iCloud("docs"): phase == .scanning ? "Not scanned yet" : "Other documents and app data"
         case .iCloud(let key): iCloudMedia(key)?.displayLabel ?? key
-        case .photosOnMac: "Photos library on this Mac"
         case .photosInCloud: "Photos only in iCloud"
         }
     }
@@ -201,7 +198,7 @@ final class ScanModel {
     func color(of special: SpecialSpace) -> Color? {
         let key = switch special {
         case .iCloud(let key): key
-        case .photosOnMac, .photosInCloud: "photos"
+        case .photosInCloud: "photos"
         case .free, .hidden: ""
         }
         return iCloudMedia(key).map(ICloudStorage.color)
@@ -429,10 +426,10 @@ final class ScanModel {
         }
         let scanner = DiskScanner(path: path, incremental: incremental, countsCloudFiles: countingCloudFiles)
         self.scanner = scanner
+        photosLibrary = nil
+        photosLibraryNode = nil
         if countingCloudFiles && DataVolume.displayPath(scanner.rootPath) == CloudFolder.iCloudPath {
-            measurePhotosLibrary()
-        } else {
-            photosLibrary = nil
+            scanPhotosLibrary(for: scanner)
         }
         countsCloudFiles = countingCloudFiles
         cloudBytes = []
@@ -504,6 +501,8 @@ final class ScanModel {
         cloudBytes = countsCloudFiles ? Self.cloudBytes(in: result.tree) : []
         if let volume = scannedVolume { scannedVolume = Self.refreshed(volume) }
         segments = layout(center: 0)
+        // Before the intro, so it grows into the chart with the library.
+        attachPhotosLibrary()
         if let lastLive, let liveFrame, !scanner.isCancelled {
             startIntro(from: lastLive, frame: liveFrame, tree: result.tree)
         }
@@ -681,46 +680,47 @@ final class ScanModel {
 
     private func layout(center: Int32) -> [Segment] {
         guard let tree else { return [] }
+        var fixedHues: [Int32: Double] = [:]
+        if let node = photosLibraryNode, let hue = color(of: .photosInCloud).flatMap(Self.hue) { fixedHues[node] = hue }
         return SunburstLayout.segments(tree: tree, center: center, rings: Self.rings, extras: extras,
-                                       parts: extraParts)
+                                       fixedHues: fixedHues)
     }
 
-    /// The Photos library on this Mac, measured while iCloud is scanned, for splitting iCloud
-    /// Photos into what is here and what is only in iCloud.
-    /// `readable` is false when the library's folders couldn't be read (Photos libraries are
-    /// protected; reading them needs Full Disk Access).
-    private(set) var photosLibrary: (path: String, bytes: Int64, readable: Bool)?
-
-    /// iCloud Photos split into the library on this Mac and the rest, when both are known.
-    var extraParts: [SpecialSpace: [(SpecialSpace, Int64)]] {
-        guard let photos = photosSplit else { return [:] }
-        return [.iCloud("photos"): [(.photosOnMac, photos.onMac), (.photosInCloud, photos.inCloud)]]
+    private static func hue(of color: Color) -> Double? {
+        NSColor(color).usingColorSpace(.deviceRGB).map { Double($0.hueComponent) }
     }
 
-    /// The library holds thumbnails and previews too, so it can be larger than what iCloud
-    /// counts; it's capped at iCloud's number.
-    private var photosSplit: (onMac: Int64, inCloud: Int64)? {
-        guard let library = photosLibrary, library.readable, let total = iCloudUsage?.storageUsageByMedia
-                .first(where: { $0.mediaKey == "photos" })?.usageInBytes, total > 0 else { return nil }
-        let onMac = min(library.bytes, total)
-        return (onMac, total - onMac)
-    }
+    /// The Photos library on this Mac, scanned along with iCloud Drive and charted next to it
+    /// (in iCloud's color for Photos), so iCloud Photos splits into what is here, file by file,
+    /// and what is only in iCloud. `tree` is nil when the library couldn't be read (Photos
+    /// libraries are protected; reading them needs Full Disk Access).
+    private(set) var photosLibrary: (path: String, tree: FileTree?)?
+    /// The library's folder in the iCloud tree, once attached.
+    private(set) var photosLibraryNode: Int32?
 
-    /// Measures the system Photos library in the background (a quick scan of its package).
-    private func measurePhotosLibrary() {
-        photosLibrary = nil
+    private func scanPhotosLibrary(for scanner: DiskScanner) {
         Task.detached(priority: .utility) {
             guard let path = PhotosStorage.systemLibraryPath() else { return }
             let result = DiskScanner(path: path).scan()
             let readable = result.errors == 0 || result.totalBytes > 0
             await MainActor.run {
-                self.photosLibrary = (path, result.totalBytes, readable)
-                // The scan may already be on screen.
-                if self.phase == .done, self.center == 0, self.transition == nil {
-                    self.segments = self.layout(center: 0)
-                }
+                guard self.scanner === scanner else { return }
+                self.photosLibrary = (path, readable ? result.tree : nil)
+                self.attachPhotosLibrary()
             }
         }
+    }
+
+    /// Attaches the library once both scans are done and iCloud's numbers are known.
+    private func attachPhotosLibrary() {
+        guard photosLibraryNode == nil, phase == .done, iCloudUsage != nil,
+              let tree, let library = photosLibrary?.tree else { return }
+        photosLibraryNode = tree.graft(library, under: 0)
+        cloudBytes = Self.cloudBytes(in: tree)
+        transition = nil
+        intro = nil
+        hovered = nil
+        segments = layout(center: center)
     }
 
     func zoomOut() {

@@ -49,8 +49,6 @@ struct SunburstView: View {
                 switch geometry.hitTest(point, segments: model.segments) {
                 case .center: model.zoomOut()
                 case .segment(let node): model.zoom(to: node)
-                // The part of iCloud Photos on this Mac is a folder that can be looked into.
-                case .special(.photosOnMac): if let path = model.photosLibrary?.path { model.scan(path: path) }
                 case .special, nil: break
                 }
             }
@@ -188,7 +186,7 @@ struct SunburstView: View {
     static func fillSpecial(_ kind: SpecialSpace, path: Path, highlighted: Bool, tint: Color? = nil,
                             opacity: Double = 1, in context: inout GraphicsContext) {
         switch kind {
-        case .iCloud, .photosOnMac:
+        case .iCloud:
             let fill = tint ?? .gray
             context.fill(path, with: .color(fill.opacity((highlighted ? 0.95 : 0.75) * opacity)))
             context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor).opacity(opacity)), lineWidth: 0.75)
@@ -346,7 +344,6 @@ extension CenterLabel {
         case .hidden: "used, but not visible to the scan: system, snapshots, swap, unreadable folders"
         case .iCloud("docs"): "in iCloud, but not as files in iCloud Drive (app data, iCloud Drive's trash, …)"
         case .iCloud: "in iCloud; not files on this Mac"
-        case .photosOnMac: "originals and previews kept on this Mac; click to look inside"
         case .photosInCloud: "not downloaded to this Mac"
         }
     }

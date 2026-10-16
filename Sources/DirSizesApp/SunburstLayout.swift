@@ -10,9 +10,8 @@ enum SpecialSpace: Hashable, Sendable {
     /// A kind of iCloud data that isn't in iCloud Drive (Photos, Backups, Mail, …), by iCloud's
     /// key. "docs" is the part of Documents that the scan didn't find as files.
     case iCloud(String)
-    /// Parts of iCloud Photos, in the ring outside it: the Photos library on this Mac, and the
-    /// rest, which is only in iCloud.
-    case photosOnMac
+    /// The part of iCloud Photos that isn't in the Photos library on this Mac, when the library
+    /// is charted next to iCloud Drive.
     case photosInCloud
 
     /// Identifies the segment across layouts.
@@ -21,7 +20,6 @@ enum SpecialSpace: Hashable, Sendable {
         case .hidden: "\u{1}hidden"
         case .free: "\u{1}free"
         case .iCloud(let key): "\u{1}icloud:" + key
-        case .photosOnMac: "\u{1}icloud:photos/mac"
         case .photosInCloud: "\u{1}icloud:photos/cloud"
         }
     }
@@ -32,7 +30,8 @@ enum SpecialSpace: Hashable, Sendable {
 enum ExtrasSource: Sendable {
     case disk(used: Int64, free: Int64)
     /// iCloud's usage by category; "docs" includes iCloud Drive.
-    case iCloud(categories: [(key: String, bytes: Int64)], free: Int64)
+    /// `photosOnMac` is the Photos library's size when it is part of the scanned tree.
+    case iCloud(categories: [(key: String, bytes: Int64)], free: Int64, photosOnMac: Int64)
 
     /// While scanning, hidden space (or Documents beyond iCloud Drive) includes what the scan
     /// hasn't reached yet, and shrinks as it goes.
@@ -40,13 +39,18 @@ enum ExtrasSource: Sendable {
         switch self {
         case .disk(let used, let free):
             return [(.hidden, max(used - scanned, 0)), (.free, free)]
-        case .iCloud(let categories, let free):
+        case .iCloud(let categories, let free, let photosOnMac):
             var result: [(SpecialSpace, Int64)] = []
             if let docs = categories.first(where: { $0.key == "docs" }) {
-                result.append((.iCloud("docs"), max(docs.bytes - scanned, 0)))
+                result.append((.iCloud("docs"), max(docs.bytes - (scanned - photosOnMac), 0)))
             }
             for category in categories.sorted(by: { $0.bytes > $1.bytes }) where category.key != "docs" {
-                result.append((.iCloud(category.key), category.bytes))
+                if category.key == "photos" && photosOnMac > 0 {
+                    // The library holds previews too, so it can be larger than what iCloud counts.
+                    result.append((.photosInCloud, max(category.bytes - photosOnMac, 0)))
+                } else {
+                    result.append((.iCloud(category.key), category.bytes))
+                }
             }
             result.append((.free, free))
             return result
@@ -152,10 +156,11 @@ enum SunburstLayout {
     }
 
     /// `extras` (free and hidden space) are only shown when centered on the root.
-    /// `parts` split special segments in the ring outside them.
+    /// Items in `fixedHues` (and everything inside them) get that hue instead of one from their
+    /// position, such as the Photos library in iCloud's color for Photos.
     static func segments(tree: FileTree, center: Int32, rings: Int,
                          extras: [(SpecialSpace, Int64)] = [],
-                         parts: [SpecialSpace: [(SpecialSpace, Int64)]] = [:]) -> [Segment] {
+                         fixedHues: [Int32: Double] = [:]) -> [Segment] {
         var result: [Segment] = []
 
         // Free and hidden space are only drawn at the root, but always take their share of the
@@ -172,7 +177,10 @@ enum SunburstLayout {
             return (centerRange.start + mid * (centerRange.end - centerRange.start) / (2 * .pi)) / (2 * .pi)
         }
 
-        func visit(_ node: Int32, depth: Int, start: Double, end: Double) {
+        // Zoomed into a fixed-hue item, or below it: everything shown inherits its hue.
+        let centerHue = fixedHues.isEmpty ? nil : tree.ancestry(of: center).lazy.compactMap { fixedHues[$0] }.last
+
+        func visit(_ node: Int32, depth: Int, start: Double, end: Double, fixedHue: Double?) {
             let total = Double(tree.nodes[Int(node)].size)
             guard depth < rings, total > 0 else { return }
             var angle = start
@@ -180,16 +188,17 @@ enum SunburstLayout {
                 let size = Double(tree.nodes[Int(child)].size)
                 let sweep = (end - start) * size / total
                 if sweep < minAngle { break }
+                let childHue = fixedHues[child] ?? fixedHue
                 result.append(Segment(node: child, depth: depth + 1, start: angle, end: angle + sweep,
-                                      hue: hue(angle, angle + sweep)))
+                                      hue: childHue ?? hue(angle, angle + sweep)))
                 if tree.nodes[Int(child)].isDirectory {
-                    visit(child, depth: depth + 1, start: angle, end: angle + sweep)
+                    visit(child, depth: depth + 1, start: angle, end: angle + sweep, fixedHue: childHue)
                 }
                 angle += sweep
             }
         }
 
-        visit(center, depth: 0, start: 0, end: span)
+        visit(center, depth: 0, start: 0, end: span, fixedHue: centerHue)
 
         let total = Double(tree.root.size) + Double(shownExtras.reduce(0) { $0 + $1.1 })
         var angle = span
@@ -197,17 +206,6 @@ enum SunburstLayout {
             let sweep = 2 * .pi * Double(bytes) / total
             if sweep >= minAngle {
                 result.append(Segment(node: -1, depth: 1, start: angle, end: angle + sweep, special: kind))
-                let split = parts[kind] ?? []
-                let splitTotal = Double(split.reduce(0) { $0 + $1.1 })
-                var partAngle = angle
-                for (part, partBytes) in split where splitTotal > 0 && rings > 1 {
-                    let partSweep = sweep * Double(partBytes) / splitTotal
-                    if partSweep >= minAngle {
-                        result.append(Segment(node: -1, depth: 2, start: partAngle, end: partAngle + partSweep,
-                                              special: part))
-                    }
-                    partAngle += partSweep
-                }
             }
             angle += sweep
         }

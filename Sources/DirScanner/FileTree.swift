@@ -43,6 +43,8 @@ public final class FileTree: @unchecked Sendable {
     private var childList: [Int32] = []
     /// Nodes deleted after the scan. Their subtrees are unreachable through `children(of:)`.
     private var removed = Set<Int32>()
+    /// Folders from elsewhere attached with `graft`, with their real paths.
+    private var graftPaths: [Int32: String] = [:]
     /// `remove(_:)` is the only mutation after the scan and runs on the main thread, so main-thread
     /// readers need no lock. Readers on other threads go through `read(_:)`.
     private let lock = NSLock()
@@ -76,6 +78,9 @@ public final class FileTree: @unchecked Sendable {
         var parts: [String] = []
         var i = index
         while i > 0 {
+            if let base = graftPaths[i] {
+                return ([base] + parts.reversed()).joined(separator: "/")
+            }
             parts.append(name(of: i))
             i = nodes[Int(i)].parent
         }
@@ -198,9 +203,11 @@ public final class FileTree: @unchecked Sendable {
 
     /// The node for an absolute path inside this tree, if it was scanned.
     public func node(atPath path: String) -> Int32? {
-        let root = name(of: 0)
+        // Inside a grafted folder, the search starts there.
+        let graft = graftPaths.first { path == $0.value || path.hasPrefix($0.value + "/") }
+        let root = graft?.value ?? name(of: 0)
         guard path == root || path.hasPrefix(root == "/" ? "/" : root + "/") else { return nil }
-        var current: Int32 = 0
+        var current: Int32 = graft?.key ?? 0
         for component in path.dropFirst(root.count).split(separator: "/") {
             guard let next = unsortedChildren(of: current).first(where: {
                 !removed.contains($0) && name(of: $0) == component
@@ -208,6 +215,41 @@ public final class FileTree: @unchecked Sendable {
             current = next
         }
         return current
+    }
+
+    /// Attaches a scan of a folder from elsewhere (such as the Photos library next to iCloud Drive)
+    /// below `parent`, adding its size to the ancestors. Its nodes keep their real paths. Returns
+    /// the attached folder's node.
+    @discardableResult
+    public func graft(_ other: FileTree, under parent: Int32) -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        let offset = Int32(nodes.count)
+        let nameBase = UInt32(names.count)
+        for node in other.nodes {
+            var copy = node
+            copy.parent = node.parent < 0 ? parent : node.parent + offset
+            copy.nameOffset += nameBase
+            nodes.append(copy)
+        }
+        names.append(contentsOf: other.names)
+        // The other tree's root is named by its whole path.
+        let path = other.name(of: 0)
+        let last = Array((path as NSString).lastPathComponent.utf8)
+        nodes[Int(offset)].nameOffset = UInt32(names.count)
+        nodes[Int(offset)].nameLength = UInt16(clamping: last.count)
+        names.append(contentsOf: last)
+        graftPaths[offset] = path
+
+        let added = other.root
+        var p = parent
+        while p >= 0 {
+            nodes[Int(p)].size += added.size
+            nodes[Int(p)].itemCount &+= added.itemCount
+            p = nodes[Int(p)].parent
+        }
+        buildChildIndex()
+        return offset
     }
 
     /// Sum sizes and item counts into parents, and index children. After this the tree only

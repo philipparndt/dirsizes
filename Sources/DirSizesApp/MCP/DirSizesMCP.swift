@@ -311,7 +311,7 @@ final class DirSizesMCP {
                 case .free: info["free_space"] = sizeInfo(bytes)
                 case .hidden: info["hidden_space"] = sizeInfo(bytes)
                 case .iCloud(let key): info["icloud_" + key] = ["label": model.label(of: special), "size": sizeInfo(bytes)]
-                case .photosOnMac, .photosInCloud: break
+                case .photosInCloud: info["icloud_photos_not_on_this_mac"] = sizeInfo(bytes)
                 }
             }
             info["collector"] = ["items": model.collected.count, "size": sizeInfo(model.collectedBytes)]
