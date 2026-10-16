@@ -56,6 +56,13 @@ struct DirSizesApp: App {
             CommandGroup(after: .newItem) {
                 Button("Open Folder…") { model.chooseFolder() }
                     .keyboardShortcut("o")
+                Divider()
+                Button("Rescan") { model.rescan() }
+                    .keyboardShortcut("r")
+                    .disabled(model.rootPath == nil || model.phase == .scanning)
+                Button("Full Rescan") { model.rescanFully() }
+                    .keyboardShortcut("r", modifiers: [.command, .option])
+                    .disabled(model.rootPath == nil || model.phase == .scanning)
             }
         }
     }

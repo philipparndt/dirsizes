@@ -1,4 +1,5 @@
 import Foundation
+import DirScanner
 
 /// A mounted disk as shown on the start screen.
 struct VolumeInfo: Identifiable, Equatable {
@@ -43,9 +44,8 @@ struct VolumeInfo: Identifiable, Equatable {
                                 Int64(values.volumeAvailableCapacity ?? 0))
             let kind: Kind = values.volumeIsLocal == false ? .network
                 : values.volumeIsInternal == true ? .internalDisk : .externalDisk
-            let dataVolume = "/System/Volumes/Data"
-            let scanPath = url.path == "/" && FileManager.default.fileExists(atPath: dataVolume + "/Users")
-                ? dataVolume : url.path
+            let scanPath = url.path == "/" && FileManager.default.fileExists(atPath: DataVolume.path + "/Users")
+                ? DataVolume.path : url.path
 
             return VolumeInfo(url: url, name: values.volumeName ?? url.lastPathComponent,
                               format: values.volumeLocalizedFormatDescription ?? "",

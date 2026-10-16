@@ -58,9 +58,10 @@ private struct VolumeCard: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Scan") { scan() }
+                Button(full || !canUpdate ? (canUpdate ? "Full Scan" : "Scan") : "Update") { scan() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
+                    .help(help)
             }
 
             CapacityBar(fraction: volume.usedFraction)
@@ -68,6 +69,9 @@ private struct VolumeCard: View {
 
             HStack {
                 Text("\(formatBytes(volume.usedBytes)) used")
+                if let date = model.savedScanDates[volume.scanPath] {
+                    Text("· last scanned \(date, format: .relative(presentation: .named))")
+                }
                 Spacer()
                 Text("\(formatBytes(volume.availableBytes)) free of \(formatBytes(volume.totalBytes))")
                     .fontWeight(.medium)
@@ -88,8 +92,20 @@ private struct VolumeCard: View {
         .help(volume.url.path)
     }
 
+    /// A saved scan exists, so only what changed since needs reading.
+    private var canUpdate: Bool { model.savedScanDates[volume.scanPath] != nil }
+
+    /// ⌥ switches between the drive's default (update; full for external drives) and the other.
+    private var full: Bool { model.prefersFullScan(volume.scanPath) != ModifierKeys.shared.option }
+
+    private var help: String {
+        guard canUpdate else { return "Scan this disk" }
+        return full ? "Read everything again (⌥ to only read what changed since the last scan)"
+                    : "Only read what changed since the last scan (⌥ for a full scan)"
+    }
+
     private func scan() {
-        model.scan(volume: volume)
+        model.scan(volume: volume, full: full)
     }
 
     private var icon: String {

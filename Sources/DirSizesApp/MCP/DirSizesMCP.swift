@@ -16,7 +16,6 @@ final class DirSizesMCP {
 
     /// The startup disk is scanned at its data volume; paths below it are reported and accepted
     /// without this prefix, the way Finder and the shell see them.
-    private static let dataVolume = "/System/Volumes/Data"
 
     init(model: ScanModel) {
         self.model = model
@@ -80,7 +79,8 @@ final class DirSizesMCP {
 
         tool("scan", """
             Scans a folder or a whole disk (pass its path from list_disks, e.g. "/") and shows it \
-            in the app, replacing the current scan and clearing the collector. Waits for the scan \
+            in the app, replacing the current scan and clearing the collector. Scanning the same \
+            place again only reads folders that changed since, so it is quick. Waits for the scan \
             to finish up to wait_seconds; call status to check on a scan that is still running.
             """, readOnly: false,
              properties: [
@@ -300,6 +300,8 @@ final class DirSizesMCP {
             let seconds = Double(model.duration.components.seconds)
                 + Double(model.duration.components.attoseconds) / 1e18
             info["scan_seconds"] = decimal(seconds, digits: 1)
+            // Scans after the first only read folders that changed since.
+            info["scan_kind"] = model.changedFolders.map { "incremental (\($0) changed folders read again)" } ?? "full"
             if model.errors > 0 {
                 info["unreadable_folders"] = model.errors
                 info["unreadable_hint"] = "Grant DirSizes Full Disk Access to scan protected folders."
@@ -384,14 +386,14 @@ final class DirSizesMCP {
         while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
         if !path.hasPrefix("/") { path = (root as NSString).appendingPathComponent(path) }
         if let node = tree.node(atPath: path) { return node }
-        if root.hasPrefix(Self.dataVolume) { return tree.node(atPath: Self.dataVolume + path) }
+        if root.hasPrefix(DataVolume.path), let data = DataVolume.dataPath(for: path), data != path {
+            return tree.node(atPath: data)
+        }
         return nil
     }
 
     private func display(_ path: String) -> String {
-        guard path.hasPrefix(Self.dataVolume) else { return path }
-        let rest = path.dropFirst(Self.dataVolume.count)
-        return rest.isEmpty ? "/" : String(rest)
+        DataVolume.displayPath(path)
     }
 
     private func number(_ value: Any?) -> Double? { (value as? NSNumber)?.doubleValue }

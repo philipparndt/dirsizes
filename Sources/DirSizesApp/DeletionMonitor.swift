@@ -32,7 +32,6 @@ final class DeletionMonitor: @unchecked Sendable {
     private static let interval: TimeInterval = 1.0
     /// Bounds the work of one "check everything below" request on a huge tree.
     private static let maxDirectoriesPerBatch = 50_000
-    private static let dataVolume = "/System/Volumes/Data"
 
     init(tree: FileTree, rootPath: String, handler: @escaping Handler) {
         self.tree = tree
@@ -168,8 +167,8 @@ final class DeletionMonitor: @unchecked Sendable {
     /// FSEvents may report startup-disk paths with or without the data volume prefix.
     private func node(forPath path: String, in tree: FileTree) -> Int32? {
         if let node = tree.node(atPath: path) { return node }
-        if rootPath.hasPrefix(Self.dataVolume) && !path.hasPrefix(Self.dataVolume) {
-            return tree.node(atPath: Self.dataVolume + path)
+        if rootPath.hasPrefix(DataVolume.path), let data = DataVolume.dataPath(for: path), data != path {
+            return tree.node(atPath: data)
         }
         return nil
     }

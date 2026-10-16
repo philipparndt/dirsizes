@@ -59,8 +59,14 @@ struct ContentView: View {
                 if model.phase == .scanning {
                     Button("Stop", systemImage: "stop.fill") { model.stop() }
                 } else {
-                    Button("Rescan", systemImage: "arrow.clockwise") { model.rescan() }
-                        .disabled(model.rootPath == nil)
+                    // ⌥ switches between an update (the default; full scans on external drives) and the other.
+                    let full = model.prefersFullScan(model.rootPath ?? "") != ModifierKeys.shared.option
+                    Button(full ? "Full Rescan" : "Rescan", systemImage: full ? "arrow.clockwise.circle" : "arrow.clockwise") {
+                        model.rescan(full: full)
+                    }
+                    .help(full ? "Read everything again (⌥ to only read what changed)"
+                               : "Update with what changed since the last scan (⌥ for a full rescan)")
+                    .disabled(model.rootPath == nil)
                 }
                 Button("Open…", systemImage: "folder") { model.chooseFolder() }
                 Button("Cleanup", systemImage: "lightbulb") { model.showCleanup() }
@@ -193,6 +199,10 @@ private struct StatusBar: View {
                     + Double(model.duration.components.attoseconds) / 1e18
                 Text("\(model.filesScanned.formatted()) files, \(formatBytes(model.tree?.root.size ?? 0)) in "
                      + String(format: "%.1f s", seconds))
+                if let changed = model.changedFolders {
+                    Text("· updated \(changed == 1 ? "1 changed folder" : "\(changed.formatted()) changed folders")")
+                        .help("Only folders that changed since the last scan were read again. ⌥ turns Rescan into Full Rescan.")
+                }
                 if model.errors > 0 {
                     Text("· \(model.errors) unreadable")
                         .help("Grant Full Disk Access to scan protected folders.")

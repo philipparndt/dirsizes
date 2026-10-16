@@ -28,6 +28,13 @@ public struct Node: Sendable {
 public final class FileTree: @unchecked Sendable {
     public internal(set) var nodes: [Node] = []
     public internal(set) var names: [UInt8] = []
+    /// Files with several hard links, and pure APFS clones, by inode or clone ID: only one node
+    /// of each ID carries the size. Kept so an incremental rescan can tell which are counted.
+    var hardLinks = IDTable()
+    var clones = IDTable()
+    /// Folders that couldn't be read; an incremental rescan always reads them again (e.g. after
+    /// Full Disk Access was granted).
+    var unreadable: [Int32] = []
 
     private var childStart: [Int32] = []
     private var childList: [Int32] = []
@@ -36,6 +43,16 @@ public final class FileTree: @unchecked Sendable {
     /// `remove(_:)` is the only mutation after the scan and runs on the main thread, so main-thread
     /// readers need no lock. Readers on other threads go through `read(_:)`.
     private let lock = NSLock()
+
+    /// For loading a saved tree.
+    init(nodes: [Node], names: [UInt8], hardLinks: IDTable, clones: IDTable, unreadable: [Int32]) {
+        self.nodes = nodes
+        self.names = names
+        self.hardLinks = hardLinks
+        self.clones = clones
+        self.unreadable = unreadable
+        buildChildIndex()
+    }
 
     init(rootName: String) {
         let bytes = Array(rootName.utf8)
@@ -88,6 +105,18 @@ public final class FileTree: @unchecked Sendable {
         return childList[Int(childStart[i])..<Int(childStart[i + 1])]
     }
 
+    /// Children of `index` in scan order, without removed ones.
+    func liveChildren(of index: Int32) -> [Int32] {
+        unsortedChildren(of: index).filter { !removed.contains($0) }
+    }
+
+    /// The name's bytes, without making a String.
+    func nameBytes(of index: Int32) -> ArraySlice<UInt8> {
+        let node = nodes[Int(index)]
+        let start = Int(node.nameOffset)
+        return names[start..<start + Int(node.nameLength)]
+    }
+
     /// Whether `index` or one of its ancestors was removed.
     public func isRemoved(_ index: Int32) -> Bool {
         var i = index
@@ -109,6 +138,38 @@ public final class FileTree: @unchecked Sendable {
             mask[i] = parent >= 0 && mask[parent] && !removed.contains(Int32(i))
         }
         return mask
+    }
+
+    /// A copy of the part below `index`, as if `rootName` had been scanned: for starting a
+    /// scan of a subfolder from a scan of a folder above it.
+    func subtree(at index: Int32, rootName: String) -> FileTree {
+        let result = FileTree(rootName: rootName)
+        let mask = subtreeMask(of: index)
+        var map = [Int32](repeating: -1, count: nodes.count)
+        map[Int(index)] = 0
+        result.nodes[0].size = nodes[Int(index)].size
+        result.nodes[0].itemCount = nodes[Int(index)].itemCount
+        for i in (Int(index) + 1)..<nodes.count where mask[i] {
+            let node = nodes[i]
+            map[i] = Int32(result.nodes.count)
+            let name = nameBytes(of: Int32(i))
+            result.nodes.append(Node(size: node.size, parent: map[Int(node.parent)],
+                                     nameOffset: UInt32(result.names.count), itemCount: node.itemCount,
+                                     nameLength: node.nameLength, kind: node.kind))
+            result.names.append(contentsOf: name)
+        }
+        func remap(_ table: IDTable) -> IDTable {
+            var narrowed = IDTable()
+            for (node, (id, size)) in zip(table.nodes, zip(table.ids, table.sizes)) where map[Int(node)] >= 0 {
+                narrowed.append(map[Int(node)], id, size: size)
+            }
+            return narrowed
+        }
+        result.hardLinks = remap(hardLinks)
+        result.clones = remap(clones)
+        result.unreadable = unreadable.compactMap { map[Int($0)] >= 0 ? map[Int($0)] : nil }
+        result.buildChildIndex()
+        return result
     }
 
     /// Runs `body` with the tree locked against `remove(_:)`, for reading off the main thread.
@@ -174,5 +235,19 @@ public final class FileTree: @unchecked Sendable {
         }
         childStart = start
         childList = list
+    }
+}
+
+/// Node indices with an ID each (inode or clone ID) and the file's allocated size, as plain
+/// arrays so they can be saved as is. Only one node per ID carries the size in `nodes`.
+struct IDTable {
+    var nodes: [Int32] = []
+    var ids: [UInt64] = []
+    var sizes: [Int64] = []
+
+    mutating func append(_ node: Int32, _ id: UInt64, size: Int64) {
+        nodes.append(node)
+        ids.append(id)
+        sizes.append(size)
     }
 }

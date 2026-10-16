@@ -12,6 +12,15 @@ and a collector to clean it up.
 - **Fast scanning.** Directories are read with `getattrlistbulk(2)` (names, types and sizes
   for many entries per system call) by a pool of worker threads, instead of `readdir` plus
   one `lstat` per file.
+- **Quick rescans.** Each scan is saved, and the next scan of the same folder or disk only
+  reads the folders that changed since, using the history macOS keeps of file changes (FSEvents).
+  Scanning a subfolder of a saved scan (say `~/dev` after the whole disk) starts from that scan
+  too. Rescanning 4 million files takes seconds instead of a minute. External and network drives
+  get a full scan by default, since other computers may have changed them without macOS noticing.
+  Hold ⌥ to switch: Update becomes Full Scan (and the other way round on external drives). Saved scans live in `~/Library/Caches/de.rnd7.dirsizes` (the five most
+  recent; a whole disk takes a few hundred MB).
+- **Live chart.** The top levels fill in while a scan runs, so the big folders show up long
+  before the scan is done.
 - **Sunburst chart.** Each ring is one level deeper. Click a folder to zoom in, click the
   center to go back up. Hover to see sizes.
 - **Whole disks.** Pick a disk on the start screen and the chart also shows free space and
@@ -99,12 +108,13 @@ random loopback port with a token that changes every launch, written to
 ## Command line
 
 ```
-dirsizes scan  <path> [--threads N] [--top N] [--cross-devices]
+dirsizes scan  <path> [--threads N] [--top N] [--cross-devices] [--incremental]
 dirsizes bench <path> [--runs N] [--skip fm,fts,du]
 dirsizes mcp
 ```
 
 By default `scan` stays on the device it starts on. Add `--cross-devices` to follow mounts.
+`--incremental` starts from the saved scan (shared with the app) and saves the result.
 
 ## Building
 

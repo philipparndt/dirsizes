@@ -3,12 +3,14 @@ import Foundation
 
 let usage = """
     usage:
-      dirsizes scan  <path> [--threads N] [--top N] [--cross-devices]
+      dirsizes scan  <path> [--threads N] [--top N] [--cross-devices] [--incremental]
       dirsizes bench <path> [--runs N] [--skip fm,fts,du]
       dirsizes mcp
       dirsizes leftovers [--all]
 
     scan   Scan <path> with the parallel getattrlistbulk scanner and print the largest entries.
+           --incremental starts from the scan saved last time (shared with the app) and only
+           reads folders that changed since, then saves the result for next time.
     bench  Compare the scanner (1 thread and N threads) against FileManager, fts and du.
            Runs are warm-cache; run `sudo purge` first for a cold-cache number.
     mcp    MCP server on stdio for AI clients, forwarding to the DirSizes app (started if needed).
@@ -37,11 +39,12 @@ func time<T>(_ body: () -> T) -> (T, Double) {
 struct Options {
     var command = ""
     var path = ""
-    var threads = ProcessInfo.processInfo.activeProcessorCount
+    var threads = DiskScanner.defaultThreads
     var top = 20
     var runs = 1
     var skip: Set<String> = []
     var crossDevices = false
+    var incremental = false
 }
 
 func parseOptions() -> Options {
@@ -60,6 +63,7 @@ func parseOptions() -> Options {
         case "--runs": options.runs = max(1, Int(value(arg)) ?? 1)
         case "--skip": options.skip = Set(value(arg).split(separator: ",").map(String.init))
         case "--cross-devices": options.crossDevices = true
+        case "--incremental": options.incremental = true
         case "-h", "--help": print(usage); exit(0)
         default: positional.append(arg)
         }
@@ -78,7 +82,8 @@ func fail(_ message: String) -> Never {
 // MARK: - scan
 
 func runScan(_ options: Options) {
-    let scanner = DiskScanner(path: options.path, threads: options.threads, stayOnDevice: !options.crossDevices)
+    let scanner = DiskScanner(path: options.path, threads: options.threads, stayOnDevice: !options.crossDevices,
+                              incremental: options.incremental ? .cached : .off)
 
     // Only create the timer when it will run: releasing a never-resumed dispatch source traps.
     let interactive = isatty(STDERR_FILENO) != 0
@@ -101,8 +106,19 @@ func runScan(_ options: Options) {
 
     let tree = result.tree
     print("\(tree.name(of: 0))  \(formatBytes(result.totalBytes))")
-    print(String(format: "%d files, %d directories, %d errors in %.2fs (%d threads)\n",
+    print(String(format: "%d files, %d directories, %d errors in %.2fs (%d threads)",
                  result.files, result.directories, result.errors, seconds(result.duration), options.threads))
+    if options.incremental {
+        if let changed = result.changedFolders {
+            print("incremental: \(changed) changed folders read again")
+        } else {
+            print("full scan (no usable earlier scan)")
+        }
+        let (saved, saving) = time { DiskScanner.save(result) }
+        print(saved ? String(format: "saved for next time in %.2fs", saving)
+                    : "not saved: a saved scan of a folder above covers it")
+    }
+    print()
     for child in tree.children(of: 0).prefix(options.top) {
         let node = tree.nodes[Int(child)]
         let marker = node.isDirectory ? "/" : ""

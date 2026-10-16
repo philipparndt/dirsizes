@@ -58,6 +58,7 @@ cask "dirsizes" do
 
   zap trash: [
     "~/Library/Application Support/de.rnd7.dirsizes",
+    "~/Library/Caches/de.rnd7.dirsizes",
     "~/Library/Preferences/de.rnd7.dirsizes.plist",
     "~/Library/Saved Application State/de.rnd7.dirsizes.savedState",
   ]

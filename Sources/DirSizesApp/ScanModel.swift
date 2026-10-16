@@ -56,6 +56,14 @@ final class ScanModel {
     private(set) var bytesScanned: Int64 = 0
     private(set) var errors = 0
     private(set) var duration: Duration = .zero
+    /// Folders read again by an incremental scan; nil after a full scan.
+    private(set) var changedFolders: Int?
+    /// What the scan is doing before it reads folders (loading the last scan, replaying changes).
+    private(set) var scanStage = DiskScanner.Stage.scanning
+    /// The top levels found so far, for a chart that fills in while scanning.
+    private(set) var liveTree: FileTree?
+    /// The finished scan's FSEvents position, for updating it incrementally.
+    private var scanInfo: ScanInfo?
     /// Expected total for the progress bar: the last scan of this path, or the volume's used
     /// space when scanning a volume root. Nil when there is no honest estimate.
     private(set) var expectedBytes: Int64?
@@ -120,6 +128,27 @@ final class ScanModel {
 
     func loadVolumes() {
         volumes = VolumeInfo.mounted()
+        refreshSavedScans()
+    }
+
+    /// When each disk was last scanned (saved scans only), for the start screen.
+    private(set) var savedScanDates: [String: Date] = [:]
+
+    private func refreshSavedScans() {
+        var dates: [String: Date] = [:]
+        for volume in volumes {
+            if let date = ScanCache.savedDate(covering: volume.scanPath) { dates[volume.scanPath] = date }
+        }
+        savedScanDates = dates
+    }
+
+    /// Full scans are the default on external and network drives: another computer may have
+    /// changed them without macOS recording it, so an update could miss changes.
+    func prefersFullScan(_ path: String) -> Bool {
+        let path = DiskScanner.normalizedPath(path)
+        let volume = volumes.filter { $0.url.path != "/" && (path == $0.scanPath || path.hasPrefix($0.url.path + "/")) }
+            .max { $0.url.path.count < $1.url.path.count }
+        return volume.map { $0.kind != .internalDisk } ?? false
     }
 
     /// Back to the disk list.
@@ -161,12 +190,19 @@ final class ScanModel {
         }
     }
 
-    func rescan() {
+    /// Scans the same folder or disk again: an update with what changed since, or a full scan
+    /// (the default for external drives). `full: nil` takes the default.
+    func rescan(full: Bool? = nil) {
         if let volume = scannedVolume {
-            scan(volume: volume)
+            scan(volume: volume, full: full)
         } else if let rootPath {
-            scan(path: rootPath)
+            scan(path: rootPath, full: full)
         }
+    }
+
+    /// Reads everything again, ignoring the earlier scan.
+    func rescanFully() {
+        rescan(full: true)
     }
 
     /// Scans `path`, as a disk scan (with free and hidden space) when it is a disk's root.
@@ -179,16 +215,21 @@ final class ScanModel {
         }
     }
 
-    func scan(volume: VolumeInfo) {
+    /// `full` reads everything instead of updating an earlier scan; nil takes the default for
+    /// the drive (see `prefersFullScan`).
+    func scan(volume: VolumeInfo, full: Bool? = nil) {
+        let full = full ?? prefersFullScan(volume.scanPath)
         withFullDiskAccess {
-            self.startScan(path: volume.scanPath)
+            self.startScan(path: volume.scanPath, full: full)
             self.scannedVolume = Self.refreshed(volume)
         }
     }
 
-    func scan(path: String) {
-        withFullDiskAccess { self.startScan(path: path) }
+    func scan(path: String, full: Bool? = nil) {
+        let full = full ?? prefersFullScan(path)
+        withFullDiskAccess { self.startScan(path: path, full: full) }
     }
+
 
     /// Asks for Full Disk Access first (unless declined this session), so the scan doesn't
     /// trigger a macOS dialog for every protected folder.
@@ -224,6 +265,11 @@ final class ScanModel {
         VolumeInfo.mounted().first { $0.url == volume.url } ?? volume
     }
 
+    /// Whether a scan of `root` includes `path` (a startup disk scan is rooted at the data volume).
+    private static func covers(_ root: String, _ path: String) -> Bool {
+        DataVolume.candidates(for: path).contains { $0 == root || $0.hasPrefix(root == "/" ? "/" : root + "/") }
+    }
+
     func stop() {
         scanner?.cancel()
     }
@@ -246,7 +292,7 @@ final class ScanModel {
         }
     }
 
-    private func startScan(path: String) {
+    private func startScan(path: String, full: Bool = false) {
         if isDemo {
             isDemo = false
             installedApps = nil
@@ -255,7 +301,16 @@ final class ScanModel {
         pollTask?.cancel()
 
         stopMonitoring()
-        let scanner = DiskScanner(path: path)
+        // Start from the scan on screen when it covers this folder, else from a saved one.
+        let normalized = DiskScanner.normalizedPath(path)
+        let incremental: DiskScanner.Incremental = if full {
+            .off
+        } else if let tree, let scanInfo, phase == .done, Self.covers(scanInfo.rootPath, normalized) {
+            .previous(tree, scanInfo)
+        } else {
+            .cached
+        }
+        let scanner = DiskScanner(path: path, incremental: incremental)
         self.scanner = scanner
         rootPath = scanner.rootPath
         scannedVolume = nil
@@ -273,6 +328,10 @@ final class ScanModel {
         filesScanned = 0
         bytesScanned = 0
         errors = 0
+        changedFolders = nil
+        scanInfo = nil
+        scanStage = .scanning
+        liveTree = nil
         expectedBytes = Self.expectedTotal(for: scanner.rootPath)
 
         Task.detached(priority: .userInitiated) {
@@ -282,8 +341,15 @@ final class ScanModel {
 
         // Only the counters are shown while scanning; the sunburst appears once the tree is complete.
         pollTask = Task {
+            var tick = 0
             while !Task.isCancelled, self.scanner === scanner, self.phase == .scanning {
                 self.updateProgress(from: scanner)
+                // The live chart twice a second: its snapshot is built off the main thread.
+                if tick % 5 == 0 {
+                    let snapshot = await Task.detached(priority: .utility) { scanner.liveSnapshot() }.value
+                    if self.scanner === scanner, self.phase == .scanning, let snapshot { self.liveTree = snapshot }
+                }
+                tick += 1
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
@@ -294,12 +360,20 @@ final class ScanModel {
         pollTask?.cancel()
         updateProgress(from: scanner)
         duration = result.duration
+        changedFolders = result.changedFolders
+        liveTree = nil
         phase = .done
         tree = result.tree
         if let volume = scannedVolume { scannedVolume = Self.refreshed(volume) }
         segments = layout(center: 0)
         if !scanner.isCancelled {
             Self.rememberTotal(result.totalBytes, for: scanner.rootPath)
+            scanInfo = result.info
+            // Saved for an incremental scan next time, also after the app was quit.
+            Task.detached(priority: .utility) {
+                DiskScanner.save(result)
+                await MainActor.run { self.refreshSavedScans() }
+            }
         }
         startMonitoring(result.tree, rootPath: scanner.rootPath)
     }
@@ -347,6 +421,7 @@ final class ScanModel {
         filesScanned = scanner.filesScanned.load(ordering: .relaxed)
         bytesScanned = scanner.bytesScanned.load(ordering: .relaxed)
         errors = scanner.errorCount.load(ordering: .relaxed)
+        scanStage = scanner.stage
     }
 
     // MARK: - Expected totals
@@ -436,14 +511,13 @@ final class ScanModel {
 
     // MARK: - Cleanup
 
-    private static let dataVolume = "/System/Volumes/Data"
 
     /// The Library folders (yours and the Mac's) the scan covers.
     var scannedLibraries: [String] {
         guard let tree else { return [] }
         if isDemo { return [tree.path(of: 0) + "/Library"] }
         return [NSHomeDirectory() + "/Library", "/Library"].compactMap { path in
-            [path, Self.dataVolume + path].first { tree.node(atPath: $0) != nil }
+            DataVolume.candidates(for: path).first { tree.node(atPath: $0) != nil }
         }
     }
 
@@ -482,7 +556,7 @@ final class ScanModel {
     func libraryPath(_ node: Int32) -> String {
         guard let tree else { return "" }
         var path = tree.path(of: node)
-        if path.hasPrefix(Self.dataVolume + "/") { path.removeFirst(Self.dataVolume.count) }
+        path = DataVolume.displayPath(path)
         let home = isDemo ? tree.path(of: 0) : NSHomeDirectory()
         if path.hasPrefix(home + "/") { path = "~" + path.dropFirst(home.count) }
         return path

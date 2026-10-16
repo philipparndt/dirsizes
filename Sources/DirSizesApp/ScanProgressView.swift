@@ -1,3 +1,4 @@
+import DirScanner
 import SwiftUI
 
 /// Scan screen: the folder being scanned, a large gradient progress bar and live counters.
@@ -6,10 +7,15 @@ struct ScanProgressView: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: 64))
-                .foregroundStyle(.tint)
-                .symbolEffect(.pulse, options: .repeating)
+            if let live = model.liveTree {
+                LiveSunburst(tree: live)
+                    .frame(width: 360, height: 360)
+            } else {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.tint)
+                    .symbolEffect(.pulse, options: .repeating)
+            }
 
             VStack(spacing: 4) {
                 Text(model.rootName)
@@ -19,6 +25,14 @@ struct ScanProgressView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                switch model.scanStage {
+                case .loadingPrevious:
+                    Text("Loading the last scan…").font(.callout).foregroundStyle(.secondary)
+                case .checkingChanges:
+                    Text("Checking what changed since…").font(.callout).foregroundStyle(.secondary)
+                case .scanning:
+                    EmptyView()
+                }
             }
 
             ProgressBar(progress: model.progress)
@@ -134,5 +148,61 @@ extension View {
     /// Keeps the widest size seen so far, so changing text never makes the layout shrink back.
     func growOnlyWidth(alignment: Alignment = .leading) -> some View {
         modifier(GrowOnlyWidth(alignment: alignment))
+    }
+}
+
+/// The top levels of a running scan, filling in as folders are read. Sizes are what was found
+/// so far; the full, interactive chart replaces it when the scan is done.
+private struct LiveSunburst: View {
+    let tree: FileTree
+    @State private var hovered: Int32?
+
+    var body: some View {
+        GeometryReader { proxy in
+            let geometry = SunburstGeometry(size: proxy.size, rings: DiskScanner.liveRings)
+            let segments = SunburstLayout.segments(center: 0, rings: DiskScanner.liveRings,
+                                                   size: { tree.nodes[Int($0)].size },
+                                                   children: { tree.children(of: $0) },
+                                                   isDirectory: { tree.nodes[Int($0)].isDirectory })
+            ZStack {
+                Canvas { context, _ in
+                    for segment in segments {
+                        guard let path = geometry.wedge(start: segment.start, end: segment.end,
+                                                        depth: Double(segment.depth)) else { continue }
+                        let fill = SunburstView.color(hue: segment.hue, depth: Double(segment.depth),
+                                                      isDirectory: tree.nodes[Int(segment.node)].isDirectory,
+                                                      highlighted: segment.node == hoveredNode)
+                        context.fill(path, with: .color(fill))
+                        context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor)), lineWidth: 0.75)
+                    }
+                }
+                VStack(spacing: 2) {
+                    Text(hoveredNode.map { tree.name(of: $0) } ?? "so far")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(formatBytes(tree.nodes[Int(hoveredNode ?? 0)].size))
+                        .font(.headline.monospacedDigit())
+                }
+                .frame(width: geometry.innerRadius * 1.7)
+                .position(geometry.center)
+                .allowsHitTesting(false)
+            }
+            .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                if case .active(let point) = phase, case .segment(let node) = geometry.hitTest(point, segments: segments) {
+                    hovered = node
+                } else {
+                    hovered = nil
+                }
+            }
+            // Each snapshot numbers its nodes anew.
+            .onChange(of: ObjectIdentifier(tree)) { hovered = nil }
+        }
+    }
+
+    private var hoveredNode: Int32? {
+        hovered.flatMap { Int($0) < tree.nodes.count ? $0 : nil }
     }
 }
