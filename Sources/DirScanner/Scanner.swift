@@ -34,6 +34,9 @@ public final class DiskScanner: @unchecked Sendable {
     private let tree: FileTree
     private let treeLock = NSLock()
     private var seenHardLinks = Set<UInt64>()
+    /// APFS clone IDs seen so far: pure clones share all their blocks, so each one's data is
+    /// counted once (like hard links). Chrome alone keeps hundreds of clones of itself.
+    private var seenClones = Set<UInt64>()
     /// Set under `treeLock` when `scan()` stops accepting results (finished or cancelled).
     private var frozen = false
     private let cancelled = Atomic<Bool>(false)
@@ -148,12 +151,14 @@ public final class DiskScanner: @unchecked Sendable {
         var nodes: [Node] = []
         var names: [UInt8] = []
         var hardLinkIDs: [(local: Int, fileID: UInt64)] = []
+        var cloneIDs: [(local: Int, cloneID: UInt64)] = []
         var subdirectoryNames: [(local: Int, name: String)] = []
 
         mutating func reset() {
             nodes.removeAll(keepingCapacity: true)
             names.removeAll(keepingCapacity: true)
             hardLinkIDs.removeAll(keepingCapacity: true)
+            cloneIDs.removeAll(keepingCapacity: true)
             subdirectoryNames.removeAll(keepingCapacity: true)
         }
     }
@@ -178,13 +183,15 @@ public final class DiskScanner: @unchecked Sendable {
             | attrgroup_t(ATTR_CMN_ERROR) | attrgroup_t(ATTR_CMN_OBJTYPE) | attrgroup_t(ATTR_CMN_FLAGS)
             | attrgroup_t(ATTR_CMN_FILEID)
         attrs.fileattr = attrgroup_t(ATTR_FILE_LINKCOUNT) | attrgroup_t(ATTR_FILE_ALLOCSIZE)
+        // Extended common attributes (with FSOPT_ATTR_CMN_EXTENDED): whether a file is a pure clone.
+        attrs.forkattr = attrgroup_t(ATTR_CMNEXT_CLONEID) | attrgroup_t(ATTR_CMNEXT_EXT_FLAGS)
 
         batch.reset()
         var fileCount = 0
         var byteCount: Int64 = 0
 
         while true {
-            let count = getattrlistbulk(fd, &attrs, buffer, Self.bufferSize, 0)
+            let count = getattrlistbulk(fd, &attrs, buffer, Self.bufferSize, UInt64(FSOPT_ATTR_CMN_EXTENDED))
             if count < 0 { errorCount.add(1, ordering: .relaxed); break }
             if count == 0 { break }
 
@@ -215,6 +222,8 @@ public final class DiskScanner: @unchecked Sendable {
         var fileID: UInt64
         var linkCount: UInt32
         var size: Int64
+        /// Set for files sharing all their blocks with other files (pure APFS clones).
+        var cloneID: UInt64?
     }
 
     /// Parses one packed entry. Attributes appear in bitmap order, except ATTR_CMN_ERROR
@@ -276,8 +285,20 @@ public final class DiskScanner: @unchecked Sendable {
             p += 8
         }
 
+        var cloneID: UInt64 = 0
+        if returned.forkattr & attrgroup_t(ATTR_CMNEXT_CLONEID) != 0 {
+            cloneID = p.loadUnaligned(as: UInt64.self)
+            p += 8
+        }
+        var extendedFlags: UInt64 = 0
+        if returned.forkattr & attrgroup_t(ATTR_CMNEXT_EXT_FLAGS) != 0 {
+            extendedFlags = p.loadUnaligned(as: UInt64.self)
+            p += 8
+        }
+        let isClone = extendedFlags & UInt64(EF_SHARES_ALL_BLOCKS) != 0 && cloneID != 0
+
         return Entry(name: name, kind: kind, isDataless: isDataless, fileID: fileID,
-                     linkCount: linkCount, size: size)
+                     linkCount: linkCount, size: size, cloneID: isClone ? cloneID : nil)
     }
 
     private func append(_ entry: Entry, parent: Int32, to batch: inout Batch) {
@@ -291,8 +312,9 @@ public final class DiskScanner: @unchecked Sendable {
         batch.names.append(contentsOf: entry.name)
         if entry.kind == .directory && !entry.isDataless {
             batch.subdirectoryNames.append((local, String(decoding: entry.name, as: UTF8.self)))
-        } else if entry.linkCount > 1 {
-            batch.hardLinkIDs.append((local, entry.fileID))
+        } else {
+            if entry.linkCount > 1 { batch.hardLinkIDs.append((local, entry.fileID)) }
+            if let cloneID = entry.cloneID { batch.cloneIDs.append((local, cloneID)) }
         }
     }
 
@@ -308,6 +330,10 @@ public final class DiskScanner: @unchecked Sendable {
 
         // Count each hard-linked file once (same inode seen via several paths).
         for (local, fileID) in batch.hardLinkIDs where !seenHardLinks.insert(fileID).inserted {
+            batch.nodes[local].size = 0
+        }
+        // And each set of pure clones once: the blocks exist only once on disk.
+        for (local, cloneID) in batch.cloneIDs where !seenClones.insert(cloneID).inserted {
             batch.nodes[local].size = 0
         }
         for i in batch.nodes.indices { batch.nodes[i].nameOffset += nameBase }
