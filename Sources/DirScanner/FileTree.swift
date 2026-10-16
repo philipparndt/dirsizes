@@ -37,7 +37,7 @@ public final class FileTree: @unchecked Sendable {
     var clones = IDTable()
     /// Folders that couldn't be read; an incremental rescan always reads them again (e.g. after
     /// Full Disk Access was granted).
-    var unreadable: [Int32] = []
+    public internal(set) var unreadable: [Int32] = []
 
     private var childStart: [Int32] = []
     private var childList: [Int32] = []

@@ -35,12 +35,14 @@ struct ScanProgressView: View {
                 }
             }
 
-            ProgressBar(progress: model.progress)
+            // Loading the last scan or checking what changed has no measurable progress yet.
+            let progress = model.scanStage == .scanning ? model.progress : nil
+            ProgressBar(progress: progress)
                 .frame(width: 420, height: 14)
 
             // Each value only ever grows in width, so the centered line doesn't jitter as digits change.
             HStack(spacing: 6) {
-                if let progress = model.progress {
+                if let progress {
                     Text(progress, format: .percent.precision(.fractionLength(0)))
                         .fontWeight(.semibold)
                         .foregroundStyle(.primary)

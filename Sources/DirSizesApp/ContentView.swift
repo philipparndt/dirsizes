@@ -262,8 +262,14 @@ private struct SpecialDetails: View {
             case .hidden:
                 note("Used on the disk, but not seen by the scan: the system volume, APFS snapshots (Time Machine), "
                      + "swap and sleep image, and folders DirSizes couldn't read.")
-                if model.errors > 0 {
-                    note("\(model.errors.formatted()) folders couldn't be read. Full Disk Access lets DirSizes see them.")
+                let unreadable = model.unreadableFolders
+                if !unreadable.isEmpty {
+                    note("\(unreadable.count.formatted()) folders couldn't be read. \(model.unreadableHint)")
+                    if !FullDiskAccess.isGranted {
+                        Button("Open Full Disk Access Settings") { FullDiskAccess.openSettings() }
+                            .buttonStyle(.link)
+                    }
+                    UnreadableList(paths: unreadable)
                 }
             case .iCloud("docs"):
                 note("In iCloud under Documents, but not as files in iCloud Drive: app data apps keep in iCloud, "
@@ -311,6 +317,37 @@ private struct SpecialDetails: View {
         Text(text)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// The folders a scan couldn't open, collapsed by default (there can be hundreds).
+private struct UnreadableList: View {
+    let paths: [String]
+    @State private var expanded = false
+
+    private static let shown = 100
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(paths.prefix(Self.shown), id: \.self) { path in
+                    Text(path)
+                        .font(.caption.monospaced())
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                        .help(path)
+                }
+                if paths.count > Self.shown {
+                    Text("and \((paths.count - Self.shown).formatted()) more")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        } label: {
+            Text("Unreadable folders")
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -423,7 +460,7 @@ private struct StatusBar: View {
                 }
                 if model.errors > 0 {
                     Text("· \(model.errors) unreadable")
-                        .help("Grant Full Disk Access to scan protected folders.")
+                        .help(model.unreadableHint)
                 }
                 let gone = model.goneSummary
                 if gone.count > 0 {

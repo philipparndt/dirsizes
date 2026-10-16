@@ -304,7 +304,7 @@ final class DirSizesMCP {
             info["scan_kind"] = model.changedFolders.map { "incremental (\($0) changed folders read again)" } ?? "full"
             if model.errors > 0 {
                 info["unreadable_folders"] = model.errors
-                info["unreadable_hint"] = "Grant DirSizes Full Disk Access to scan protected folders."
+                info["unreadable_hint"] = model.unreadableHint
             }
             for (special, bytes) in model.extras {
                 switch special {

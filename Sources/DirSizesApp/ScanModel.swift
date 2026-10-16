@@ -183,6 +183,22 @@ final class ScanModel {
         (phase == .scanning ? liveExtras : extras).first { $0.0 == special }?.1 ?? 0
     }
 
+    /// Why folders couldn't be read: without Full Disk Access, that's the likely reason; with
+    /// it, macOS protects them from every app (System Integrity Protection).
+    var unreadableHint: String {
+        FullDiskAccess.isGranted
+            ? "macOS protects these folders from all apps, even with Full Disk Access."
+            : "Grant DirSizes Full Disk Access to scan protected folders."
+    }
+
+    /// Folders the scan couldn't open, as shown to users (/Library, not /System/Volumes/Data/Library).
+    var unreadableFolders: [String] {
+        guard let tree else { return [] }
+        return tree.unreadable.filter { !tree.isRemoved($0) }
+            .map { DataVolume.displayPath(tree.path(of: $0)) }
+            .sorted()
+    }
+
     /// The name shown for a special segment.
     func label(of special: SpecialSpace) -> String {
         switch special {
