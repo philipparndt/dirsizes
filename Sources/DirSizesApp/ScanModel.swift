@@ -105,7 +105,17 @@ final class ScanModel {
     private(set) var unusedApps: [UnusedApp]?
     private(set) var findingUnusedApps = false
     private(set) var findingLeftovers = false
-    private var installedApps: InstalledApps?
+    /// Duplicate files in the scan; nil until looked for. Set in ScanModel+Duplicates.swift,
+    /// as are the running search and its progress.
+    var duplicates: [DuplicateGroup]?
+    var duplicateSearch: DuplicateSearch?
+    var duplicateProgress = DuplicateSearch.Progress()
+    /// The smallest files `duplicates` compared.
+    var duplicatesMinimumSize: Int64 = 0
+    /// Launch agents and daemons of removed apps; nil until looked for (ScanModel+StartupItems.swift).
+    var startupItems: [StartupItem]?
+    var findingStartupItems = false
+    private(set) var installedApps: InstalledApps?
     private var isDemo = false
     /// The Full Disk Access sheet is up; `pendingScan` runs once it is answered.
     var asksForFullDiskAccess = false
@@ -301,6 +311,8 @@ final class ScanModel {
         showsCleanup = false
         leftovers = nil
         unusedApps = nil
+        resetDuplicates()
+        startupItems = nil
         hovered = nil
         hoveredSpecial = nil
         loadVolumes()
@@ -468,6 +480,8 @@ final class ScanModel {
         showsCleanup = false
         leftovers = nil
         unusedApps = nil
+        resetDuplicates()
+        startupItems = nil
         filesScanned = 0
         bytesScanned = 0
         errors = 0
@@ -992,6 +1006,8 @@ final class ScanModel {
         segments = layout(center: center)
         if leftovers != nil { findLeftovers() }
         if unusedApps != nil { findUnusedApps() }
+        duplicates = duplicates?.compactMap { $0.remaining(in: tree) }
+        if startupItems != nil { findStartupItems() }
     }
 }
 

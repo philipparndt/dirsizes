@@ -6,13 +6,14 @@ import SwiftUI
 /// deleting stays with the collector.
 struct CleanupView: View {
     enum Tab: String {
-        case leftBehind, unusedApps
+        case leftBehind, unusedApps, duplicates, startupItems
     }
 
     @Environment(ScanModel.self) private var model
     @AppStorage("cleanupTab") private var tab = Tab.leftBehind
     @AppStorage("cleanupShowsCheck") private var showsCheck = true
     @AppStorage("unusedAppsMonths") private var months = 6
+    @AppStorage("duplicatesMinimumSize") private var duplicatesMinimumSize = 1_000_000
     @State private var selection = Set<CleanupRow.ID>()
     @FocusState private var listFocused: Bool
 
@@ -26,6 +27,8 @@ struct CleanupView: View {
                 Picker("", selection: $tab) {
                     Text("Left Behind").tag(Tab.leftBehind)
                     Text("Unused Apps").tag(Tab.unusedApps)
+                    Text("Duplicates").tag(Tab.duplicates)
+                    Text("Startup Items").tag(Tab.startupItems)
                 }
                 .pickerStyle(.segmented)
                 .fixedSize()
@@ -45,6 +48,20 @@ struct CleanupView: View {
                         Text("Any time").tag(0)
                     }
                     .fixedSize()
+                case .duplicates:
+                    Picker("At least", selection: $duplicatesMinimumSize) {
+                        Text("100 KB").tag(100_000)
+                        Text("1 MB").tag(1_000_000)
+                        Text("10 MB").tag(10_000_000)
+                        Text("100 MB").tag(100_000_000)
+                        Text("1 GB").tag(1_000_000_000)
+                    }
+                    .fixedSize()
+                    .help("Smaller files aren't compared")
+                case .startupItems:
+                    Toggle("Show entries to check", isOn: $showsCheck)
+                        .toggleStyle(.checkbox)
+                        .help("Also list items that may still belong to something installed")
                 }
             }
             .padding(.horizontal, 12)
@@ -55,6 +72,8 @@ struct CleanupView: View {
                 switch tab {
                 case .leftBehind: content
                 case .unusedApps: UnusedAppsList(months: months)
+                case .duplicates: DuplicatesList(minimumSize: Int64(duplicatesMinimumSize))
+                case .startupItems: StartupItemsList(showsCheck: showsCheck)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -455,7 +474,7 @@ private struct AppItemRow: View {
 }
 
 /// Whether the nodes are in the collector (all, some, none); a click adds or removes them all.
-private struct CollectCheckbox: View {
+struct CollectCheckbox: View {
     @Environment(ScanModel.self) private var model
     let nodes: [Int32]
 
