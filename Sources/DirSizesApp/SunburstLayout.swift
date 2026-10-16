@@ -1,11 +1,57 @@
 import DirScanner
 import SwiftUI
 
-/// Space on a scanned disk that isn't a file in the tree, shown at the root of the chart.
-enum SpecialSpace: Equatable {
+/// Space that isn't a file in the tree, shown at the root of the chart: on a scanned disk, or in
+/// iCloud around iCloud Drive.
+enum SpecialSpace: Hashable, Sendable {
     /// Used, but not seen by the scan (system volume, snapshots, swap, unreadable folders).
     case hidden
     case free
+    /// A kind of iCloud data that isn't in iCloud Drive (Photos, Backups, Mail, …), by iCloud's
+    /// key. "docs" is the part of Documents that the scan didn't find as files.
+    case iCloud(String)
+    /// Parts of iCloud Photos, in the ring outside it: the Photos library on this Mac, and the
+    /// rest, which is only in iCloud.
+    case photosOnMac
+    case photosInCloud
+
+    /// Identifies the segment across layouts.
+    var key: String {
+        switch self {
+        case .hidden: "\u{1}hidden"
+        case .free: "\u{1}free"
+        case .iCloud(let key): "\u{1}icloud:" + key
+        case .photosOnMac: "\u{1}icloud:photos/mac"
+        case .photosInCloud: "\u{1}icloud:photos/cloud"
+        }
+    }
+}
+
+/// What the chart shows around the scanned tree at its root, for a given scanned size: free and
+/// hidden space of a disk, or the rest of an iCloud account around iCloud Drive.
+enum ExtrasSource: Sendable {
+    case disk(used: Int64, free: Int64)
+    /// iCloud's usage by category; "docs" includes iCloud Drive.
+    case iCloud(categories: [(key: String, bytes: Int64)], free: Int64)
+
+    /// While scanning, hidden space (or Documents beyond iCloud Drive) includes what the scan
+    /// hasn't reached yet, and shrinks as it goes.
+    func extras(scanned: Int64) -> [(SpecialSpace, Int64)] {
+        switch self {
+        case .disk(let used, let free):
+            return [(.hidden, max(used - scanned, 0)), (.free, free)]
+        case .iCloud(let categories, let free):
+            var result: [(SpecialSpace, Int64)] = []
+            if let docs = categories.first(where: { $0.key == "docs" }) {
+                result.append((.iCloud("docs"), max(docs.bytes - scanned, 0)))
+            }
+            for category in categories.sorted(by: { $0.bytes > $1.bytes }) where category.key != "docs" {
+                result.append((.iCloud(category.key), category.bytes))
+            }
+            result.append((.free, free))
+            return result
+        }
+    }
 }
 
 /// One ring segment. Angles are in radians, 0 at the top, increasing clockwise.
@@ -27,15 +73,26 @@ struct SunburstGeometry {
     let center: CGPoint
     let innerRadius: CGFloat
     let ringWidth: CGFloat
-    let rings: Int
+    /// Fractional while rings are added during an animation.
+    let rings: Double
 
     init(size: CGSize, rings: Int) {
-        self.rings = rings
-        center = CGPoint(x: size.width / 2, y: size.height / 2)
-        let outer = max(min(size.width, size.height) / 2 - 12, 40)
-        innerRadius = outer * 0.24
-        ringWidth = (outer - innerRadius) / CGFloat(rings)
+        self.init(center: CGPoint(x: size.width / 2, y: size.height / 2),
+                  outerRadius: Self.outerRadius(for: size), rings: Double(rings))
     }
+
+    init(center: CGPoint, outerRadius: CGFloat, rings: Double) {
+        self.rings = rings
+        self.center = center
+        innerRadius = outerRadius * 0.24
+        ringWidth = (outerRadius - innerRadius) / CGFloat(rings)
+    }
+
+    static func outerRadius(for size: CGSize) -> CGFloat {
+        max(min(size.width, size.height) / 2 - 12, 40)
+    }
+
+    var outerRadius: CGFloat { innerRadius + CGFloat(rings) * ringWidth }
 
     func radii(depth: Int) -> (inner: CGFloat, outer: CGFloat) {
         let inner = innerRadius + CGFloat(depth - 1) * ringWidth
@@ -45,7 +102,7 @@ struct SunburstGeometry {
     /// The ring segment shape. `depth` may be fractional (during animations); the part beyond
     /// the outermost ring is clipped, and nil is returned when nothing is left.
     func wedge(start: Double, end: Double, depth: Double) -> Path? {
-        let limit = innerRadius + CGFloat(rings) * ringWidth
+        let limit = outerRadius
         let inner = innerRadius + CGFloat(depth - 1) * ringWidth
         guard inner < limit else { return nil }
         let outer = min(inner + ringWidth, limit)
@@ -95,8 +152,10 @@ enum SunburstLayout {
     }
 
     /// `extras` (free and hidden space) are only shown when centered on the root.
+    /// `parts` split special segments in the ring outside them.
     static func segments(tree: FileTree, center: Int32, rings: Int,
-                         extras: [(SpecialSpace, Int64)] = []) -> [Segment] {
+                         extras: [(SpecialSpace, Int64)] = [],
+                         parts: [SpecialSpace: [(SpecialSpace, Int64)]] = [:]) -> [Segment] {
         var result: [Segment] = []
 
         // Free and hidden space are only drawn at the root, but always take their share of the
@@ -138,6 +197,17 @@ enum SunburstLayout {
             let sweep = 2 * .pi * Double(bytes) / total
             if sweep >= minAngle {
                 result.append(Segment(node: -1, depth: 1, start: angle, end: angle + sweep, special: kind))
+                let split = parts[kind] ?? []
+                let splitTotal = Double(split.reduce(0) { $0 + $1.1 })
+                var partAngle = angle
+                for (part, partBytes) in split where splitTotal > 0 && rings > 1 {
+                    let partSweep = sweep * Double(partBytes) / splitTotal
+                    if partSweep >= minAngle {
+                        result.append(Segment(node: -1, depth: 2, start: partAngle, end: partAngle + partSweep,
+                                              special: part))
+                    }
+                    partAngle += partSweep
+                }
             }
             angle += sweep
         }

@@ -121,6 +121,7 @@ By default `scan` stays on the device it starts on. Add `--cross-devices` to fol
 You need Xcode (the build uses Xcode's Swift toolchain through `xcrun`).
 
 ```sh
+make run               # build the app and open the start screen
 make run DIR=~/dev     # build the app and scan a folder
 make demo              # launch with made-up data
 make install           # copy DirSizes.app to /Applications

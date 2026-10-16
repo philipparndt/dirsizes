@@ -307,7 +307,12 @@ final class DirSizesMCP {
                 info["unreadable_hint"] = "Grant DirSizes Full Disk Access to scan protected folders."
             }
             for (special, bytes) in model.extras {
-                info[special == .free ? "free_space" : "hidden_space"] = sizeInfo(bytes)
+                switch special {
+                case .free: info["free_space"] = sizeInfo(bytes)
+                case .hidden: info["hidden_space"] = sizeInfo(bytes)
+                case .iCloud(let key): info["icloud_" + key] = ["label": model.label(of: special), "size": sizeInfo(bytes)]
+                case .photosOnMac, .photosInCloud: break
+                }
             }
             info["collector"] = ["items": model.collected.count, "size": sizeInfo(model.collectedBytes)]
             let gone = model.goneSummary
@@ -333,7 +338,8 @@ final class DirSizesMCP {
         let item = tree.nodes[Int(node)]
         var info: [String: Any] = [
             "path": display(tree.path(of: node)),
-            "kind": item.isDirectory ? "folder" : item.kind == .symlink ? "symlink" : "file",
+            "kind": item.isDirectory ? "folder" : item.kind == .symlink ? "symlink"
+                : item.kind == .cloudFile ? "file only in iCloud" : "file",
             "size": sizeInfo(item.size),
         ]
         if item.isDirectory { info["files"] = Int(item.itemCount) }

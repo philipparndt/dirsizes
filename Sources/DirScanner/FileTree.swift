@@ -18,6 +18,9 @@ public struct Node: Sendable {
         case directory
         case symlink
         case other
+        /// A file whose contents are only in iCloud (or another File Provider). Its size is the
+        /// file's length, not space on this disk. Only scans with `countsCloudFiles` produce it.
+        case cloudFile
     }
 
     public var isDirectory: Bool { kind == .directory }

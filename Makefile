@@ -1,7 +1,7 @@
 # DirSizes: disk usage scanner (CLI) and sunburst viewer (SwiftUI app).
 #
 #   make                  build everything (release)
-#   make run DIR=~/dev    launch the app and scan DIR
+#   make run              launch the app on the start screen (DIR=~/dev scans DIR right away)
 #   make demo             launch the app with made-up data
 #   make app              build build/DirSizes.app (needed to grant Full Disk Access)
 #   make install          install DirSizes.app to /Applications (INSTALL_DIR=~/Applications)
@@ -38,6 +38,7 @@ APP_VERSION := $(shell cat VERSION)
 BUNDLE_ID ?= de.rnd7.dirsizes
 INSTALL_DIR ?= /Applications
 ICON       = Resources/AppIcon.icns
+ENTITLEMENTS = Resources/DirSizes.entitlements
 
 .PHONY: all build run demo scan bench app open-app install icon screenshot clean \
 	release release-publish tap sign-check
@@ -48,8 +49,9 @@ build:
 	$(SWIFT) build -c $(CONFIG) $(ARCH_FLAGS) $(LINK_FLAGS)
 
 # Runs the binary inside the bundle so the Dock shows the app icon.
+# Only scans when DIR is given on the command line; its default is for scan and bench.
 run: app
-	$(APP)/Contents/MacOS/$(APP_NAME) -path $(DIR)
+	$(APP)/Contents/MacOS/$(APP_NAME) $(if $(filter command line,$(origin DIR)),-path $(DIR))
 
 demo: app
 	$(APP)/Contents/MacOS/$(APP_NAME) -demo YES
@@ -81,8 +83,9 @@ app: build
 	plutil -insert LSApplicationCategoryType -string public.app-category.utilities $(APP)/Contents/Info.plist
 	plutil -insert NSHighResolutionCapable -bool true $(APP)/Contents/Info.plist
 	plutil -insert CFBundleIconFile -string AppIcon $(APP)/Contents/Info.plist
+	plutil -insert NSPhotoLibraryUsageDescription -string "DirSizes adds up the sizes of your photos and videos to estimate what iCloud Photos stores. Nothing is changed or uploaded." $(APP)/Contents/Info.plist
 	codesign --force --sign - $(APP)/Contents/Resources/bin/dirsizes
-	codesign --force --sign - $(APP)
+	codesign --force --sign - --entitlements $(ENTITLEMENTS) $(APP)
 	@echo "Built $(APP)"
 
 open-app: app

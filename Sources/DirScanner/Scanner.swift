@@ -51,6 +51,10 @@ public final class DiskScanner: @unchecked Sendable {
     public let rootPath: String
     public let threadCount: Int
     public let stayOnDevice: Bool
+    /// Counts files that are only in iCloud at their length (as `.cloudFile`), for what a cloud
+    /// folder holds in the cloud rather than on this disk. Such scans are never incremental:
+    /// other scans of the same folder count those files as taking no space.
+    public let countsCloudFiles: Bool
 
     // Live progress, readable from any thread while a scan runs.
     public let filesScanned = Atomic<Int>(0)
@@ -114,13 +118,14 @@ public final class DiskScanner: @unchecked Sendable {
     }
 
     public init(path: String, threads: Int = DiskScanner.defaultThreads, stayOnDevice: Bool = true,
-                incremental: Incremental = .off) {
+                incremental: Incremental = .off, countsCloudFiles: Bool = false) {
         let normalized = Self.normalizedPath(path)
         rootPath = normalized
         threadCount = max(1, threads)
         self.stayOnDevice = stayOnDevice
         tree = FileTree(rootName: normalized)
-        self.incremental = incremental
+        self.countsCloudFiles = countsCloudFiles
+        self.incremental = countsCloudFiles ? .off : incremental
     }
 
     public func scan() -> ScanResult {
@@ -337,6 +342,7 @@ public final class DiskScanner: @unchecked Sendable {
             | attrgroup_t(ATTR_CMN_ERROR) | attrgroup_t(ATTR_CMN_OBJTYPE) | attrgroup_t(ATTR_CMN_FLAGS)
             | attrgroup_t(ATTR_CMN_FILEID)
         attrs.fileattr = attrgroup_t(ATTR_FILE_LINKCOUNT) | attrgroup_t(ATTR_FILE_ALLOCSIZE)
+            | (countsCloudFiles ? attrgroup_t(ATTR_FILE_TOTALSIZE) : 0)
         // Extended common attributes (with FSOPT_ATTR_CMN_EXTENDED): whether a file is a pure clone.
         attrs.forkattr = attrgroup_t(ATTR_CMNEXT_CLONEID) | attrgroup_t(ATTR_CMNEXT_EXT_FLAGS)
 
@@ -361,7 +367,7 @@ public final class DiskScanner: @unchecked Sendable {
                     append(parsed, parent: job.index, to: &batch)
                     if parsed.kind != .directory {
                         fileCount += 1
-                        byteCount += parsed.size
+                        byteCount += batch.nodes[batch.nodes.count - 1].size
                     }
                 }
             }
@@ -428,6 +434,8 @@ public final class DiskScanner: @unchecked Sendable {
         var fileID: UInt64
         var linkCount: UInt32
         var size: Int64
+        /// The file's length; only read when counting cloud files.
+        var length: Int64
         /// Set for files sharing all their blocks with other files (pure APFS clones).
         var cloneID: UInt64?
     }
@@ -485,6 +493,13 @@ public final class DiskScanner: @unchecked Sendable {
             p += 4
         }
 
+        // TOTALSIZE comes before ALLOCSIZE in the buffer.
+        var length: Int64 = 0
+        if returned.fileattr & attrgroup_t(ATTR_FILE_TOTALSIZE) != 0 {
+            length = p.loadUnaligned(as: Int64.self)
+            p += 8
+        }
+
         var size: Int64 = 0
         if returned.fileattr & attrgroup_t(ATTR_FILE_ALLOCSIZE) != 0 {
             size = p.loadUnaligned(as: Int64.self)
@@ -504,17 +519,18 @@ public final class DiskScanner: @unchecked Sendable {
         let isClone = extendedFlags & UInt64(EF_SHARES_ALL_BLOCKS) != 0 && cloneID != 0
 
         return Entry(name: name, kind: kind, isDataless: isDataless, fileID: fileID,
-                     linkCount: linkCount, size: size, cloneID: isClone ? cloneID : nil)
+                     linkCount: linkCount, size: size, length: length, cloneID: isClone ? cloneID : nil)
     }
 
     private func append(_ entry: Entry, parent: Int32, to batch: inout Batch) {
         let local = batch.nodes.count
-        batch.nodes.append(Node(size: entry.kind == .directory ? 0 : entry.size,
+        let inCloud = countsCloudFiles && entry.isDataless && entry.kind == .file
+        batch.nodes.append(Node(size: entry.kind == .directory ? 0 : inCloud ? entry.length : entry.size,
                                 parent: parent,
                                 nameOffset: UInt32(batch.names.count),
                                 itemCount: 0,
                                 nameLength: UInt16(clamping: entry.name.count),
-                                kind: entry.kind))
+                                kind: inCloud ? .cloudFile : entry.kind))
         batch.names.append(contentsOf: entry.name)
         if entry.kind == .directory && !entry.isDataless {
             batch.subdirectoryNames.append((local, String(decoding: entry.name, as: UTF8.self), -1))

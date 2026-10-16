@@ -10,16 +10,18 @@ struct SunburstView: View {
     var body: some View {
         GeometryReader { proxy in
             let geometry = SunburstGeometry(size: proxy.size, rings: ScanModel.rings)
-            ZStack {
-                // The timeline only ticks while a zoom animation runs.
-                TimelineView(.animation(paused: model.transition == nil)) { timeline in
+            let origin = proxy.frame(in: .global).origin
+            // The timeline only ticks while a zoom or the intro runs.
+            TimelineView(.animation(paused: model.transition == nil && model.intro == nil)) { timeline in
+                let shown = introGeometry(at: timeline.date, final: geometry, origin: origin) ?? geometry
+                ZStack {
                     Canvas { context, _ in
-                        draw(in: &context, geometry: geometry, date: timeline.date)
+                        draw(in: &context, geometry: shown, date: timeline.date)
                     }
+                    CenterLabel(width: geometry.innerRadius * 1.6)
+                        .position(shown.center)
+                        .allowsHitTesting(false)
                 }
-                CenterLabel(width: geometry.innerRadius * 1.6)
-                    .position(geometry.center)
-                    .allowsHitTesting(false)
             }
             .contentShape(Rectangle())
             .onContinuousHover { phase in
@@ -47,6 +49,8 @@ struct SunburstView: View {
                 switch geometry.hitTest(point, segments: model.segments) {
                 case .center: model.zoomOut()
                 case .segment(let node): model.zoom(to: node)
+                // The part of iCloud Photos on this Mac is a folder that can be looked into.
+                case .special(.photosOnMac): if let path = model.photosLibrary?.path { model.scan(path: path) }
                 case .special, nil: break
                 }
             }
@@ -65,8 +69,37 @@ struct SunburstView: View {
         }
     }
 
+    /// While the chart grows out of the live one: its place and size between the two, with the
+    /// live chart's rings becoming this one's.
+    private func introGeometry(at date: Date, final: SunburstGeometry, origin: CGPoint) -> SunburstGeometry? {
+        guard let intro = model.intro else { return nil }
+        let t = intro.morph.progress(at: date)
+        let liveCenter = CGPoint(x: intro.liveCenter.x - origin.x, y: intro.liveCenter.y - origin.y)
+        return SunburstGeometry(
+            center: CGPoint(x: lerp(liveCenter.x, final.center.x, t), y: lerp(liveCenter.y, final.center.y, t)),
+            outerRadius: lerp(intro.liveOuterRadius, final.outerRadius, t),
+            rings: intro.morph.rings(at: date))
+    }
+
     private func draw(in context: inout GraphicsContext, geometry: SunburstGeometry, date: Date) {
         guard let tree = model.tree else { return }
+        if let intro = model.intro {
+            for segment in intro.morph.segments(at: date) {
+                if let special = segment.special {
+                    drawSpecial(special, start: segment.start, end: segment.end, depth: Double(segment.depth),
+                                opacity: 1, in: &context, geometry: geometry)
+                } else if let path = geometry.wedge(start: segment.start, end: segment.end,
+                                                    depth: Double(segment.depth)) {
+                    let fill = Self.color(hue: segment.hue, depth: Double(segment.depth),
+                                          isDirectory: segment.isDirectory, inCloud: segment.inCloud,
+                                          highlighted: false)
+                    context.fill(path, with: .color(fill))
+                    context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor)), lineWidth: 0.75)
+                }
+            }
+            drawDisc(in: &context, geometry: geometry)
+            return
+        }
         let hoveredChain = model.hovered.map { Set(tree.ancestry(of: $0)) } ?? []
         let collected = Set(model.collected)
         let gone = model.gone
@@ -116,6 +149,10 @@ struct SunburstView: View {
             }
         }
 
+        drawDisc(in: &context, geometry: geometry)
+    }
+
+    private func drawDisc(in context: inout GraphicsContext, geometry: SunburstGeometry) {
         let disc = Path(ellipseIn: CGRect(x: geometry.center.x - geometry.innerRadius,
                                           y: geometry.center.y - geometry.innerRadius,
                                           width: geometry.innerRadius * 2,
@@ -132,7 +169,8 @@ struct SunburstView: View {
         let node = tree.nodes[Int(index)]
         let fill = gone
             ? Color(white: highlighted ? 0.55 : 0.42)
-            : Self.color(hue: hue, depth: depth, isDirectory: node.isDirectory, highlighted: highlighted)
+            : Self.color(hue: hue, depth: depth, isDirectory: node.isDirectory, inCloud: node.kind == .cloudFile,
+                         highlighted: highlighted)
         context.fill(path, with: .color(fill.opacity(opacity)))
         context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor).opacity(opacity)), lineWidth: 0.75)
     }
@@ -141,8 +179,24 @@ struct SunburstView: View {
     private func drawSpecial(_ kind: SpecialSpace, start: Double, end: Double, depth: Double, opacity: Double,
                              in context: inout GraphicsContext, geometry: SunburstGeometry) {
         guard let path = geometry.wedge(start: start, end: end, depth: depth) else { return }
-        let highlighted = model.hoveredSpecial == kind
+        Self.fillSpecial(kind, path: path, highlighted: model.hoveredSpecial == kind, tint: model.color(of: kind),
+                         opacity: opacity, in: &context)
+    }
+
+    /// Free space is an empty, outlined slot; hidden space solid gray; iCloud categories in
+    /// iCloud's colors (the rest of Documents in gray).
+    static func fillSpecial(_ kind: SpecialSpace, path: Path, highlighted: Bool, tint: Color? = nil,
+                            opacity: Double = 1, in context: inout GraphicsContext) {
         switch kind {
+        case .iCloud, .photosOnMac:
+            let fill = tint ?? .gray
+            context.fill(path, with: .color(fill.opacity((highlighted ? 0.95 : 0.75) * opacity)))
+            context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor).opacity(opacity)), lineWidth: 0.75)
+        case .photosInCloud:
+            // See-through, like files only in iCloud.
+            let fill = tint ?? .gray
+            context.fill(path, with: .color(fill.opacity((highlighted ? 0.5 : 0.3) * opacity)))
+            context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor).opacity(opacity)), lineWidth: 0.75)
         case .free:
             context.fill(path, with: .color(.primary.opacity((highlighted ? 0.12 : 0.05) * opacity)))
             context.stroke(path, with: .color(.secondary.opacity(0.5 * opacity)),
@@ -155,18 +209,20 @@ struct SunburstView: View {
 
     /// Hue comes from the item's position in the root chart, so a subtree keeps its parent's color
     /// family and colors stay put when zooming; outer rings get lighter. Files are desaturated so
-    /// folders stand out, like DaisyDisk.
-    static func color(hue: Double, depth: Double, isDirectory: Bool, highlighted: Bool) -> Color {
+    /// folders stand out, like DaisyDisk. Files only in iCloud are see-through: they take no
+    /// space on this Mac.
+    static func color(hue: Double, depth: Double, isDirectory: Bool, inCloud: Bool = false,
+                      highlighted: Bool) -> Color {
         let level = max(depth - 1, 0)
         var saturation = max(0.75 - level * 0.09, 0.25)
         var brightness = min(0.78 + level * 0.04, 0.98)
         if !isDirectory { saturation *= 0.25 }
         if highlighted { brightness = min(brightness + 0.15, 1); saturation = min(saturation + 0.1, 1) }
         return Color(hue: hue, saturation: saturation, brightness: brightness)
+            .opacity(inCloud ? (highlighted ? 0.55 : 0.35) : 1)
     }
 }
 
-private func lerp(_ a: Double, _ b: Double, _ t: Double) -> Double { a + (b - a) * t }
 
 /// Drag image for a chart item: its own wedge (or the center disc), with name and size.
 private struct DragPreview: View {
@@ -181,7 +237,7 @@ private struct DragPreview: View {
             let item = tree.nodes[Int(node)]
             VStack(spacing: 6) {
                 shape(for: node, isDirectory: item.isDirectory)
-                Text(node == 0 ? model.rootName : tree.name(of: node))
+                Text(model.displayName(of: node))
                     .font(.callout.weight(.semibold))
                     .lineLimit(1)
                 Text(formatBytes(item.size))
@@ -222,15 +278,14 @@ private struct CenterLabel: View {
     var body: some View {
         if let special = model.hoveredSpecial {
             VStack(spacing: 4) {
-                Text(special == .free ? "Free space" : "Hidden space")
+                Text(model.label(of: special))
                     .font(.subheadline.weight(.medium))
+                    .multilineTextAlignment(.center)
                 Text(formatBytes(model.bytes(of: special)))
                     .font(.title3.monospacedDigit().weight(.semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
-                Text(special == .free
-                     ? "available on \(model.rootName)"
-                     : "used, but not visible to the scan: system, snapshots, swap, unreadable folders")
+                Text(explanation(of: special))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -239,21 +294,32 @@ private struct CenterLabel: View {
         } else if let tree = model.tree {
             let node = tree.nodes[Int(model.focused)]
             VStack(spacing: 4) {
-                Text(model.focused == 0 ? model.rootName : tree.name(of: model.focused))
+                Text(model.displayName(of: model.focused))
                     .font(.subheadline.weight(.medium))
                     .lineLimit(2)
                     .truncationMode(.middle)
                     .multilineTextAlignment(.center)
-                Text(formatBytes(node.size))
+                // At the root of the iCloud chart: everything in iCloud, not just iCloud Drive.
+                let iCloudTotals = model.focused == 0 ? model.iCloudUsage?.storageUsageInfo : nil
+                Text(formatBytes(iCloudTotals?.usedStorageInBytes ?? node.size))
                     .font(.title3.monospacedDigit().weight(.semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
-                if model.isGone(model.focused) {
+                if let iCloudTotals {
+                    Text("of \(formatBytes(iCloudTotals.totalStorageInBytes))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if model.isGone(model.focused) {
                     Text("deleted outside DirSizes")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else if node.isDirectory {
                     Text("\(node.itemCount.formatted()) files")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let cloud = model.bytesInCloud(model.focused), cloud > 0 {
+                    Text(node.kind == .cloudFile ? "only in iCloud" : "\(formatBytes(cloud)) only in iCloud")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -269,6 +335,19 @@ private struct CenterLabel: View {
                 }
             }
             .frame(width: width)
+        }
+    }
+}
+
+extension CenterLabel {
+    fileprivate func explanation(of special: SpecialSpace) -> String {
+        switch special {
+        case .free: model.iCloudUsage != nil ? "left in your iCloud plan" : "available on \(model.rootName)"
+        case .hidden: "used, but not visible to the scan: system, snapshots, swap, unreadable folders"
+        case .iCloud("docs"): "in iCloud, but not as files in iCloud Drive (app data, iCloud Drive's trash, …)"
+        case .iCloud: "in iCloud; not files on this Mac"
+        case .photosOnMac: "originals and previews kept on this Mac; click to look inside"
+        case .photosInCloud: "not downloaded to this Mac"
         }
     }
 }

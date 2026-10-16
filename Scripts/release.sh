@@ -60,7 +60,8 @@ while IFS= read -r -d '' binary; do
 	codesign --force --timestamp --options runtime --sign "$IDENTITY" "$binary"
 	echo "    signed ${binary#"$APP/"}"
 done < <(find "$APP/Contents" -type f -perm -111 -print0)
-codesign --force --timestamp --options runtime --sign "$IDENTITY" "$APP"
+codesign --force --timestamp --options runtime --entitlements Resources/DirSizes.entitlements \
+	--sign "$IDENTITY" "$APP"
 codesign --verify --strict --verbose=2 "$APP"
 
 # --- Check before Apple does ------------------------------------------------------------

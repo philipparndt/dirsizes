@@ -158,7 +158,7 @@ private struct CollectedRow: View {
                 Image(systemName: item.isDirectory ? "folder.fill" : "doc")
                     .foregroundStyle(item.isDirectory && !gone ? Color.accentColor : .secondary)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(tree.name(of: node))
+                    Text(model.displayName(of: node))
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .foregroundStyle(gone ? .secondary : .primary)
@@ -464,7 +464,8 @@ private struct CollectorSunburst: View {
             let fill = isGone
                 ? Color(white: highlighted ? 0.55 : 0.42)
                 : SunburstView.color(hue: segment.hue, depth: Double(segment.depth),
-                                     isDirectory: collection.isDirectory(segment.node), highlighted: highlighted)
+                                     isDirectory: collection.isDirectory(segment.node),
+                                     inCloud: tree.nodes[Int(segment.node)].kind == .cloudFile, highlighted: highlighted)
             let dimmed = !selected.isEmpty && !isSelected && !hoveredChain.contains(segment.node)
             context.fill(path, with: .color(fill.opacity((isAncestor ? 0.35 : 1) * (dimmed ? 0.4 : 1))))
             context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor)), lineWidth: 0.75)

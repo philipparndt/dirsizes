@@ -152,38 +152,46 @@ extension View {
 }
 
 /// The top levels of a running scan, filling in as folders are read. Sizes are what was found
-/// so far; the full, interactive chart replaces it when the scan is done.
+/// so far; each snapshot is animated to, and the full chart grows out of this one when the scan is done.
 private struct LiveSunburst: View {
+    @Environment(ScanModel.self) private var model
     let tree: FileTree
     @State private var hovered: Int32?
+    @State private var hoveredSpecial: SpecialSpace?
 
     var body: some View {
         GeometryReader { proxy in
             let geometry = SunburstGeometry(size: proxy.size, rings: DiskScanner.liveRings)
-            let segments = SunburstLayout.segments(center: 0, rings: DiskScanner.liveRings,
-                                                   size: { tree.nodes[Int($0)].size },
-                                                   children: { tree.children(of: $0) },
-                                                   isDirectory: { tree.nodes[Int($0)].isDirectory })
             ZStack {
-                Canvas { context, _ in
-                    for segment in segments {
-                        guard let path = geometry.wedge(start: segment.start, end: segment.end,
-                                                        depth: Double(segment.depth)) else { continue }
-                        let fill = SunburstView.color(hue: segment.hue, depth: Double(segment.depth),
-                                                      isDirectory: tree.nodes[Int(segment.node)].isDirectory,
-                                                      highlighted: segment.node == hoveredNode)
-                        context.fill(path, with: .color(fill))
-                        context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor)), lineWidth: 0.75)
+                TimelineView(.animation) { timeline in
+                    Canvas { context, _ in
+                        guard let morph = model.liveMorph else { return }
+                        for segment in morph.segments(at: timeline.date) {
+                            guard let path = geometry.wedge(start: segment.start, end: segment.end,
+                                                            depth: Double(segment.depth)) else { continue }
+                            if let special = segment.special {
+                                SunburstView.fillSpecial(special, path: path, highlighted: special == hoveredSpecial,
+                                                         tint: model.color(of: special), in: &context)
+                                continue
+                            }
+                            let fill = SunburstView.color(hue: segment.hue, depth: Double(segment.depth),
+                                                          isDirectory: segment.isDirectory, inCloud: segment.inCloud,
+                                                          highlighted: segment.node >= 0 && segment.node == hoveredNode)
+                            context.fill(path, with: .color(fill))
+                            context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor)), lineWidth: 0.75)
+                        }
                     }
                 }
                 VStack(spacing: 2) {
-                    Text(hoveredNode.map { tree.name(of: $0) } ?? "so far")
+                    Text(label)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text(formatBytes(tree.nodes[Int(hoveredNode ?? 0)].size))
+                    Text(formatBytes(bytes))
                         .font(.headline.monospacedDigit())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
                 }
                 .frame(width: geometry.innerRadius * 1.7)
                 .position(geometry.center)
@@ -191,18 +199,32 @@ private struct LiveSunburst: View {
             }
             .contentShape(Rectangle())
             .onContinuousHover { phase in
-                if case .active(let point) = phase, case .segment(let node) = geometry.hitTest(point, segments: segments) {
-                    hovered = node
+                let hit: SunburstGeometry.Hit? = if case .active(let point) = phase {
+                    geometry.hitTest(point, segments: model.liveSegments)
                 } else {
-                    hovered = nil
+                    nil
                 }
+                hovered = if case .segment(let node) = hit { node } else { nil }
+                hoveredSpecial = if case .special(let kind) = hit { kind } else { nil }
             }
             // Each snapshot numbers its nodes anew.
             .onChange(of: ObjectIdentifier(tree)) { hovered = nil }
+            // The finished chart starts from here.
+            .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { model.liveChartFrame = $0 }
         }
     }
 
     private var hoveredNode: Int32? {
         hovered.flatMap { Int($0) < tree.nodes.count ? $0 : nil }
+    }
+
+    private var label: String {
+        if let hoveredSpecial { return model.label(of: hoveredSpecial) }
+        return hoveredNode.map { CloudFolder.displayName(ofPath: tree.path(of: $0)) ?? tree.name(of: $0) } ?? "so far"
+    }
+
+    private var bytes: Int64 {
+        if let hoveredSpecial { return model.bytes(of: hoveredSpecial) }
+        return tree.nodes[Int(hoveredNode ?? 0)].size
     }
 }

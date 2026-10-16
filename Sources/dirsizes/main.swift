@@ -3,7 +3,7 @@ import Foundation
 
 let usage = """
     usage:
-      dirsizes scan  <path> [--threads N] [--top N] [--cross-devices] [--incremental]
+      dirsizes scan  <path> [--threads N] [--top N] [--cross-devices] [--incremental] [--cloud]
       dirsizes bench <path> [--runs N] [--skip fm,fts,du]
       dirsizes mcp
       dirsizes leftovers [--all]
@@ -11,6 +11,8 @@ let usage = """
     scan   Scan <path> with the parallel getattrlistbulk scanner and print the largest entries.
            --incremental starts from the scan saved last time (shared with the app) and only
            reads folders that changed since, then saves the result for next time.
+           --cloud counts files that are only in iCloud at their size (nothing is downloaded),
+           e.g. for "~/Library/Mobile Documents"; it can't be combined with --incremental.
     bench  Compare the scanner (1 thread and N threads) against FileManager, fts and du.
            Runs are warm-cache; run `sudo purge` first for a cold-cache number.
     mcp    MCP server on stdio for AI clients, forwarding to the DirSizes app (started if needed).
@@ -45,6 +47,7 @@ struct Options {
     var skip: Set<String> = []
     var crossDevices = false
     var incremental = false
+    var cloud = false
 }
 
 func parseOptions() -> Options {
@@ -64,6 +67,7 @@ func parseOptions() -> Options {
         case "--skip": options.skip = Set(value(arg).split(separator: ",").map(String.init))
         case "--cross-devices": options.crossDevices = true
         case "--incremental": options.incremental = true
+        case "--cloud": options.cloud = true
         case "-h", "--help": print(usage); exit(0)
         default: positional.append(arg)
         }
@@ -83,7 +87,8 @@ func fail(_ message: String) -> Never {
 
 func runScan(_ options: Options) {
     let scanner = DiskScanner(path: options.path, threads: options.threads, stayOnDevice: !options.crossDevices,
-                              incremental: options.incremental ? .cached : .off)
+                              incremental: options.incremental ? .cached : .off, countsCloudFiles: options.cloud)
+    if options.cloud && options.incremental { fail("--cloud can't be combined with --incremental") }
 
     // Only create the timer when it will run: releasing a never-resumed dispatch source traps.
     let interactive = isatty(STDERR_FILENO) != 0
@@ -121,7 +126,7 @@ func runScan(_ options: Options) {
     print()
     for child in tree.children(of: 0).prefix(options.top) {
         let node = tree.nodes[Int(child)]
-        let marker = node.isDirectory ? "/" : ""
+        let marker = node.isDirectory ? "/" : node.kind == .cloudFile ? " (only in iCloud)" : ""
         let items = node.isDirectory ? Int(node.itemCount) : 1
         print(formatBytes(node.size).leftPad(10) + String(items).leftPad(11) + "  " + tree.name(of: child) + marker)
     }

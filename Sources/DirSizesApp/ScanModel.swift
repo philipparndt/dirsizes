@@ -1,6 +1,7 @@
 import AppKit
 import DirScanner
 import Observation
+import SwiftUI
 import Synchronization
 
 /// A running zoom animation. The `inner` node's layout is drawn mapped into its slice of
@@ -24,6 +25,17 @@ struct ZoomTransition {
         let eased = t < 0.5 ? 4 * t * t * t : 1 - pow(-2 * t + 2, 3) / 2
         return zoomingIn ? eased : 1 - eased
     }
+}
+
+/// The finished chart growing out of the live one when a scan ends.
+struct ChartIntro {
+    let id = UUID()
+    let morph: ChartMorph
+    /// The live chart's center (in global coordinates) and size.
+    let liveCenter: CGPoint
+    let liveOuterRadius: CGFloat
+
+    static let duration = 0.8
 }
 
 @MainActor
@@ -62,8 +74,21 @@ final class ScanModel {
     private(set) var scanStage = DiskScanner.Stage.scanning
     /// The top levels found so far, for a chart that fills in while scanning.
     private(set) var liveTree: FileTree?
+    /// The live chart's segments (for hovering) and its animation from the previous snapshot.
+    private(set) var liveSegments: [Segment] = []
+    /// Free space and what the scan hasn't reached yet, for disk scans.
+    private(set) var liveExtras: [(SpecialSpace, Int64)] = []
+    private(set) var liveMorph: ChartMorph?
+    /// Where the live chart is in the window, so the finished chart can grow out of it.
+    @ObservationIgnored var liveChartFrame: CGRect?
+    /// The finished chart growing out of the live one: from its last state and place, gaining rings.
+    private(set) var intro: ChartIntro?
     /// The finished scan's FSEvents position, for updating it incrementally.
     private var scanInfo: ScanInfo?
+    /// The scan counts files that are only in iCloud at their size (see `DiskScanner.countsCloudFiles`).
+    private(set) var countsCloudFiles = false
+    /// For such scans: bytes in iCloud only, per node (folders include their contents).
+    private(set) var cloudBytes: [Int64] = []
     /// Expected total for the progress bar: the last scan of this path, or the volume's used
     /// space when scanning a volume root. Nil when there is no honest estimate.
     private(set) var expectedBytes: Int64?
@@ -102,17 +127,89 @@ final class ScanModel {
     /// The disk's name for disk scans (the startup disk's data volume is scanned at
     /// /System/Volumes/Data, but should read "Macintosh HD"), otherwise the folder name.
     var rootName: String {
-        scannedVolume?.name ?? ((rootPath ?? "") as NSString).lastPathComponent
+        if iCloudUsage != nil { return "iCloud" }
+        return scannedVolume?.name ?? rootPath.flatMap(CloudFolder.displayName(ofPath:))
+            ?? ((rootPath ?? "") as NSString).lastPathComponent
     }
 
-    /// Free and hidden space for the root of a disk scan, empty for folder scans.
+    /// Readable names of iCloud's app containers in the current tree, looked up once per tree.
+    @ObservationIgnored private var containerNames: (tree: ObjectIdentifier, names: [Int32: String])?
+
+    /// The name to show for `node`: the root's name, an iCloud container's app name, or the
+    /// file name.
+    func displayName(of node: Int32) -> String {
+        guard let tree else { return "" }
+        if node == 0 { return rootName }
+        if containerNames?.tree != ObjectIdentifier(tree) {
+            var names: [Int32: String] = [:]
+            let folder = DataVolume.candidates(for: CloudFolder.iCloudPath).lazy.compactMap(tree.node(atPath:)).first
+            if let folder {
+                for child in tree.children(of: folder) {
+                    names[child] = CloudFolder.displayName(ofPath: tree.path(of: child))
+                }
+            }
+            containerNames = (ObjectIdentifier(tree), names)
+        }
+        return containerNames?.names[node] ?? tree.name(of: node)
+    }
+
+    /// Free and hidden space for the root of a disk scan, the rest of iCloud around an iCloud
+    /// Drive scan, empty for folder scans.
     var extras: [(SpecialSpace, Int64)] {
-        guard let volume = scannedVolume, let tree else { return [] }
-        return [(.hidden, max(volume.usedBytes - tree.root.size, 0)), (.free, volume.availableBytes)]
+        guard let tree, let source = extrasSource else { return [] }
+        return source.extras(scanned: tree.root.size)
+    }
+
+    private var extrasSource: ExtrasSource? {
+        if let volume = scannedVolume { return .disk(used: volume.usedBytes, free: volume.availableBytes) }
+        if let usage = iCloudUsage {
+            return .iCloud(categories: usage.storageUsageByMedia.map { ($0.mediaKey, $0.usageInBytes) },
+                           free: max(usage.storageUsageInfo.totalStorageInBytes - usage.storageUsageInfo.usedStorageInBytes, 0))
+        }
+        return nil
+    }
+
+    /// The iCloud account's usage, when the scan is of iCloud Drive with files only in iCloud
+    /// counted and the user signed in to iCloud.com: the chart then shows all of iCloud.
+    var iCloudUsage: ICloudStorage.Usage? {
+        guard countsCloudFiles, let rootPath, DataVolume.displayPath(rootPath) == CloudFolder.iCloudPath,
+              case .loaded(let usage, _, _) = iCloudStorage.state else { return nil }
+        return usage
     }
 
     func bytes(of special: SpecialSpace) -> Int64 {
-        extras.first { $0.0 == special }?.1 ?? 0
+        switch special {
+        case .photosOnMac: return photosSplit?.onMac ?? 0
+        case .photosInCloud: return photosSplit?.inCloud ?? 0
+        default: return (phase == .scanning ? liveExtras : extras).first { $0.0 == special }?.1 ?? 0
+        }
+    }
+
+    /// The name shown for a special segment.
+    func label(of special: SpecialSpace) -> String {
+        switch special {
+        case .free: phase == .scanning || iCloudUsage == nil ? "Free space" : "Free in iCloud"
+        case .hidden: phase == .scanning ? "Not scanned yet" : "Hidden space"
+        case .iCloud("docs"): phase == .scanning ? "Not scanned yet" : "Other documents and app data"
+        case .iCloud(let key): iCloudMedia(key)?.displayLabel ?? key
+        case .photosOnMac: "Photos library on this Mac"
+        case .photosInCloud: "Photos only in iCloud"
+        }
+    }
+
+    /// The color of an iCloud category, as iCloud shows it.
+    func color(of special: SpecialSpace) -> Color? {
+        let key = switch special {
+        case .iCloud(let key): key
+        case .photosOnMac, .photosInCloud: "photos"
+        case .free, .hidden: ""
+        }
+        return iCloudMedia(key).map(ICloudStorage.color)
+    }
+
+    private func iCloudMedia(_ key: String) -> ICloudStorage.Usage.Media? {
+        guard case .loaded(let usage, _, _) = iCloudStorage.state else { return nil }
+        return usage.storageUsageByMedia.first { $0.mediaKey == key }
     }
 
     init() {
@@ -128,8 +225,16 @@ final class ScanModel {
 
     func loadVolumes() {
         volumes = VolumeInfo.mounted()
+        cloudFolders = CloudFolder.available()
         refreshSavedScans()
     }
+
+    /// iCloud Drive and other cloud folders, for the start screen.
+    private(set) var cloudFolders: [CloudFolder] = []
+    /// The iCloud Photos estimate on the start screen.
+    let photos = PhotosStorage()
+    /// iCloud storage by category and family member, from iCloud.com after signing in.
+    let iCloudStorage = ICloudStorage()
 
     /// When each disk was last scanned (saved scans only), for the start screen.
     private(set) var savedScanDates: [String: Date] = [:]
@@ -139,7 +244,17 @@ final class ScanModel {
         for volume in volumes {
             if let date = ScanCache.savedDate(covering: volume.scanPath) { dates[volume.scanPath] = date }
         }
+        for folder in cloudFolders {
+            if let date = ScanCache.savedDate(covering: folder.path) { dates[folder.path] = date }
+        }
         savedScanDates = dates
+    }
+
+    /// Tooltip for a Scan button: a plain scan only reads what changed since a saved scan,
+    /// except where full scans are the default.
+    func scanHelp(_ path: String) -> String {
+        savedScanDates[path] != nil && !prefersFullScan(path)
+            ? "Read what changed since the last scan" : "Read everything"
     }
 
     /// Full scans are the default on external and network drives: another computer may have
@@ -163,6 +278,7 @@ final class ScanModel {
         tree = nil
         segments = []
         transition = nil
+        intro = nil
         collected = []
         showsCollectorReview = false
         showsCleanup = false
@@ -196,7 +312,7 @@ final class ScanModel {
         if let volume = scannedVolume {
             scan(volume: volume, full: full)
         } else if let rootPath {
-            scan(path: rootPath, full: full)
+            scan(path: rootPath, full: full, countingCloudFiles: countsCloudFiles)
         }
     }
 
@@ -225,9 +341,10 @@ final class ScanModel {
         }
     }
 
-    func scan(path: String, full: Bool? = nil) {
+    /// `countingCloudFiles` also counts files that are only in iCloud, at their size.
+    func scan(path: String, full: Bool? = nil, countingCloudFiles: Bool = false) {
         let full = full ?? prefersFullScan(path)
-        withFullDiskAccess { self.startScan(path: path, full: full) }
+        withFullDiskAccess { self.startScan(path: path, full: full, countingCloudFiles: countingCloudFiles) }
     }
 
 
@@ -292,7 +409,7 @@ final class ScanModel {
         }
     }
 
-    private func startScan(path: String, full: Bool = false) {
+    private func startScan(path: String, full: Bool = false, countingCloudFiles: Bool = false) {
         if isDemo {
             isDemo = false
             installedApps = nil
@@ -310,8 +427,15 @@ final class ScanModel {
         } else {
             .cached
         }
-        let scanner = DiskScanner(path: path, incremental: incremental)
+        let scanner = DiskScanner(path: path, incremental: incremental, countsCloudFiles: countingCloudFiles)
         self.scanner = scanner
+        if countingCloudFiles && DataVolume.displayPath(scanner.rootPath) == CloudFolder.iCloudPath {
+            measurePhotosLibrary()
+        } else {
+            photosLibrary = nil
+        }
+        countsCloudFiles = countingCloudFiles
+        cloudBytes = []
         rootPath = scanner.rootPath
         scannedVolume = nil
         hoveredSpecial = nil
@@ -331,23 +455,34 @@ final class ScanModel {
         changedFolders = nil
         scanInfo = nil
         scanStage = .scanning
-        liveTree = nil
-        expectedBytes = Self.expectedTotal(for: scanner.rootPath)
+        intro = nil
+        resetLive()
+        expectedBytes = Self.expectedTotal(for: totalsKey(scanner))
 
         Task.detached(priority: .userInitiated) {
             let result = scanner.scan()
             await self.finish(scanner, result: result)
         }
 
-        // Only the counters are shown while scanning; the sunburst appears once the tree is complete.
+        // Counters ten times a second, the live chart less often.
         pollTask = Task {
             var tick = 0
             while !Task.isCancelled, self.scanner === scanner, self.phase == .scanning {
                 self.updateProgress(from: scanner)
-                // The live chart twice a second: its snapshot is built off the main thread.
+                // The live chart twice a second: its snapshot and layout are made off the main thread.
                 if tick % 5 == 0 {
-                    let snapshot = await Task.detached(priority: .utility) { scanner.liveSnapshot() }.value
-                    if self.scanner === scanner, self.phase == .scanning, let snapshot { self.liveTree = snapshot }
+                    let source = self.extrasSource
+                    let live = await Task.detached(priority: .utility) {
+                        () -> (FileTree, [Segment], [KeyedSegment], [(SpecialSpace, Int64)])? in
+                        guard let snapshot = scanner.liveSnapshot() else { return nil }
+                        let extras = source?.extras(scanned: snapshot.root.size) ?? []
+                        let segments = SunburstLayout.segments(tree: snapshot, center: 0, rings: DiskScanner.liveRings,
+                                                               extras: extras)
+                        return (snapshot, segments, KeyedSegment.keyed(segments, tree: snapshot), extras)
+                    }.value
+                    if self.scanner === scanner, self.phase == .scanning, let (snapshot, segments, keyed, extras) = live {
+                        self.showLive(snapshot, segments: segments, keyed: keyed, extras: extras)
+                    }
                 }
                 tick += 1
                 try? await Task.sleep(for: .milliseconds(100))
@@ -361,13 +496,22 @@ final class ScanModel {
         updateProgress(from: scanner)
         duration = result.duration
         changedFolders = result.changedFolders
-        liveTree = nil
+        let lastLive = liveMorph?.segments(at: Date())
+        let liveFrame = liveChartFrame
+        resetLive()
         phase = .done
         tree = result.tree
+        cloudBytes = countsCloudFiles ? Self.cloudBytes(in: result.tree) : []
         if let volume = scannedVolume { scannedVolume = Self.refreshed(volume) }
         segments = layout(center: 0)
+        if let lastLive, let liveFrame, !scanner.isCancelled {
+            startIntro(from: lastLive, frame: liveFrame, tree: result.tree)
+        }
         if !scanner.isCancelled {
-            Self.rememberTotal(result.totalBytes, for: scanner.rootPath)
+            Self.rememberTotal(result.totalBytes, for: totalsKey(scanner))
+        }
+        // Scans counting cloud files can't be updated incrementally or seed other scans.
+        if !scanner.isCancelled && !scanner.countsCloudFiles {
             scanInfo = result.info
             // Saved for an incremental scan next time, also after the app was quit.
             Task.detached(priority: .utility) {
@@ -376,6 +520,66 @@ final class ScanModel {
             }
         }
         startMonitoring(result.tree, rootPath: scanner.rootPath)
+    }
+
+    /// Progress estimates are kept apart for scans counting cloud files: their totals differ.
+    private func totalsKey(_ scanner: DiskScanner) -> String {
+        scanner.countsCloudFiles ? scanner.rootPath + " (iCloud)" : scanner.rootPath
+    }
+
+    /// Bytes in iCloud only below each node, leaving out deleted items: children come after
+    /// their parents, so one backwards pass adds everything up.
+    private static func cloudBytes(in tree: FileTree) -> [Int64] {
+        let present = tree.subtreeMask(of: 0)
+        var bytes = tree.nodes.indices.map { present[$0] && tree.nodes[$0].kind == .cloudFile ? tree.nodes[$0].size : 0 }
+        for i in stride(from: bytes.count - 1, to: 0, by: -1) where bytes[i] > 0 {
+            bytes[Int(tree.nodes[i].parent)] += bytes[i]
+        }
+        return bytes
+    }
+
+    /// How much of `node` is only in iCloud; nil when the scan doesn't count cloud files.
+    func bytesInCloud(_ node: Int32) -> Int64? {
+        countsCloudFiles && Int(node) < cloudBytes.count ? cloudBytes[Int(node)] : nil
+    }
+
+    // MARK: - Live chart
+
+    /// Animates the live chart from where it is now to the new snapshot's layout.
+    private func showLive(_ snapshot: FileTree, segments: [Segment], keyed: [KeyedSegment],
+                          extras: [(SpecialSpace, Int64)]) {
+        let now = Date()
+        let rings = Double(DiskScanner.liveRings)
+        liveTree = snapshot
+        liveSegments = segments
+        liveExtras = extras
+        // Lasts a bit longer than the time to the next snapshot, so the chart never stands still.
+        liveMorph = ChartMorph(from: liveMorph?.segments(at: now) ?? [], to: keyed,
+                               fromRings: rings, toRings: rings, duration: 0.7, easeOut: true, start: now)
+    }
+
+    private func resetLive() {
+        liveTree = nil
+        liveSegments = []
+        liveExtras = []
+        liveMorph = nil
+        liveChartFrame = nil
+    }
+
+    /// The finished chart takes over from the live one: it moves and grows from the live chart's
+    /// place, and its outer rings slide in.
+    private func startIntro(from live: [KeyedSegment], frame: CGRect, tree: FileTree) {
+        let next = ChartIntro(
+            morph: ChartMorph(from: live, to: KeyedSegment.keyed(segments, tree: tree),
+                              fromRings: Double(DiskScanner.liveRings), toRings: Double(Self.rings),
+                              duration: ChartIntro.duration),
+            liveCenter: CGPoint(x: frame.midX, y: frame.midY),
+            liveOuterRadius: SunburstGeometry.outerRadius(for: frame.size))
+        intro = next
+        Task {
+            try? await Task.sleep(for: .seconds(ChartIntro.duration))
+            if self.intro?.id == next.id { self.intro = nil }
+        }
     }
 
     // MARK: - External deletions
@@ -471,12 +675,52 @@ final class ScanModel {
 
         center = node
         hovered = nil
+        intro = nil
         segments = newSegments
     }
 
     private func layout(center: Int32) -> [Segment] {
         guard let tree else { return [] }
-        return SunburstLayout.segments(tree: tree, center: center, rings: Self.rings, extras: extras)
+        return SunburstLayout.segments(tree: tree, center: center, rings: Self.rings, extras: extras,
+                                       parts: extraParts)
+    }
+
+    /// The Photos library on this Mac, measured while iCloud is scanned, for splitting iCloud
+    /// Photos into what is here and what is only in iCloud.
+    /// `readable` is false when the library's folders couldn't be read (Photos libraries are
+    /// protected; reading them needs Full Disk Access).
+    private(set) var photosLibrary: (path: String, bytes: Int64, readable: Bool)?
+
+    /// iCloud Photos split into the library on this Mac and the rest, when both are known.
+    var extraParts: [SpecialSpace: [(SpecialSpace, Int64)]] {
+        guard let photos = photosSplit else { return [:] }
+        return [.iCloud("photos"): [(.photosOnMac, photos.onMac), (.photosInCloud, photos.inCloud)]]
+    }
+
+    /// The library holds thumbnails and previews too, so it can be larger than what iCloud
+    /// counts; it's capped at iCloud's number.
+    private var photosSplit: (onMac: Int64, inCloud: Int64)? {
+        guard let library = photosLibrary, library.readable, let total = iCloudUsage?.storageUsageByMedia
+                .first(where: { $0.mediaKey == "photos" })?.usageInBytes, total > 0 else { return nil }
+        let onMac = min(library.bytes, total)
+        return (onMac, total - onMac)
+    }
+
+    /// Measures the system Photos library in the background (a quick scan of its package).
+    private func measurePhotosLibrary() {
+        photosLibrary = nil
+        Task.detached(priority: .utility) {
+            guard let path = PhotosStorage.systemLibraryPath() else { return }
+            let result = DiskScanner(path: path).scan()
+            let readable = result.errors == 0 || result.totalBytes > 0
+            await MainActor.run {
+                self.photosLibrary = (path, result.totalBytes, readable)
+                // The scan may already be on screen.
+                if self.phase == .done, self.center == 0, self.transition == nil {
+                    self.segments = self.layout(center: 0)
+                }
+            }
+        }
     }
 
     func zoomOut() {
@@ -681,6 +925,8 @@ final class ScanModel {
         while center != 0 && tree.isRemoved(center) { center = tree.nodes[Int(center)].parent }
         hovered = nil
         transition = nil
+        intro = nil
+        if countsCloudFiles { cloudBytes = Self.cloudBytes(in: tree) }
         self.tree = tree
         segments = layout(center: center)
         if leftovers != nil { findLeftovers() }
