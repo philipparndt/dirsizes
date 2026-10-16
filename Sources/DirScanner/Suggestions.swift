@@ -48,11 +48,18 @@ public struct SuggestionSection: Sendable, Identifiable {
     public let title: String
     /// Whether the age filter applies (its suggestions have dates).
     public let byAge: Bool
+    public let grouping: Grouping
     public let suggestions: [Suggestion]
 
-    public init(title: String, byAge: Bool = false, suggestions: [Suggestion]) {
+    /// Sections showing the same items grouped another way; only one grouping is shown.
+    public enum Grouping: Sendable {
+        case always, byProject, byKind
+    }
+
+    public init(title: String, byAge: Bool = false, grouping: Grouping = .always, suggestions: [Suggestion]) {
         self.title = title
         self.byAge = byAge
+        self.grouping = grouping
         self.suggestions = suggestions
     }
 }

@@ -127,19 +127,24 @@ public enum DeveloperCacheFinder {
 
     /// What a project folder holds that its tools make again, by folder name, with the files next
     /// to it that say which tool made it.
-    private static let outputs: [String: (markers: [String], effect: Suggestion.Effect)] = [
-        "node_modules": (["package.json"], .redownloaded),
-        "target": (["Cargo.toml", "pom.xml"], .rebuilt),
-        ".build": (["Package.swift"], .rebuilt),
-        "build": (["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "pubspec.yaml"], .rebuilt),
-        ".gradle": (["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"], .rebuilt),
-        "Pods": (["Podfile"], .redownloaded),
-        ".next": (["package.json"], .rebuilt),
-        ".nuxt": (["package.json"], .rebuilt),
-        ".dart_tool": (["pubspec.yaml"], .rebuilt),
-        ".venv": ([], .redownloaded),
-        "venv": ([], .redownloaded),
-        "DerivedData": ([], .rebuilt),
+    private static let outputs: [String: (markers: [String], effect: Suggestion.Effect, note: String)] = [
+        "node_modules": (["package.json"], .redownloaded,
+                         "Installed packages, installed again by `npm install` (or yarn, pnpm, bun)."),
+        "target": (["Cargo.toml", "pom.xml"], .rebuilt, "Build output of Cargo or Maven, made again by the next build."),
+        ".build": (["Package.swift"], .rebuilt, "Build output of Swift packages, made again by `swift build`."),
+        "build": (["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "pubspec.yaml"], .rebuilt,
+                  "Build output of Gradle or Flutter, made again by the next build."),
+        ".gradle": (["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"], .rebuilt,
+                    "Gradle's cache for the project, made again by the next build."),
+        "Pods": (["Podfile"], .redownloaded, "Installed CocoaPods, installed again by `pod install`."),
+        ".next": (["package.json"], .rebuilt, "Build output of Next.js, made again by the next build."),
+        ".nuxt": (["package.json"], .rebuilt, "Build output of Nuxt, made again by the next build."),
+        ".dart_tool": (["pubspec.yaml"], .rebuilt, "Dart's cache for the project, made again by `pub get`."),
+        ".venv": ([], .redownloaded,
+                  "A Python virtual environment. Make it again and install the packages (`uv sync`, `pip install -r requirements.txt`)."),
+        "venv": ([], .redownloaded,
+                 "A Python virtual environment. Make it again and install the packages (`uv sync`, `pip install -r requirements.txt`)."),
+        "DerivedData": ([], .rebuilt, "Xcode build output kept next to the project, made again by the next build."),
     ]
 
     private static let packages: Set<String> = ["app", "framework", "bundle", "photoslibrary", "xcodeproj",
@@ -178,10 +183,33 @@ public enum DeveloperCacheFinder {
         if let projects {
             let found = findProjects(in: tree, below: projects, home: home)
             if !found.isEmpty {
-                sections.append(SuggestionSection(title: "Projects", byAge: true, suggestions: found))
+                sections.append(SuggestionSection(title: "Projects", byAge: true, grouping: .byProject, suggestions: found))
+                sections += byKind(found, tree: tree)
             }
         }
         return sections
+    }
+
+    /// The projects' build output by kind (all `node_modules` folders, all `.build` folders, …),
+    /// largest kind first, each largest first.
+    private static func byKind(_ projects: [Suggestion], tree: FileTree) -> [SuggestionSection] {
+        var kinds: [String: [Suggestion]] = [:]
+        for project in projects {
+            for item in project.items {
+                let name = tree.name(of: item)
+                guard let (_, effect, note) = outputs[name] else { continue }
+                // venv and .venv are the same kind.
+                let kind = name == "venv" ? ".venv" : name
+                kinds[kind, default: []].append(Suggestion(
+                    id: tree.path(of: item), title: project.title, subtitle: project.subtitle, effect: effect,
+                    note: note, items: [item], date: project.date, tree: tree))
+            }
+        }
+        return kinds.map { kind, found in
+            SuggestionSection(title: kind == ".venv" ? "Python environments (.venv, venv)" : kind, byAge: true,
+                              grouping: .byKind, suggestions: found.sorted { $0.size > $1.size })
+        }
+        .sorted { $0.suggestions.reduce(0) { $0 + $1.size } > $1.suggestions.reduce(0) { $0 + $1.size } }
     }
 
     /// "iPhone 15 Pro · iOS 17.2", from the simulator's device.plist.
@@ -207,7 +235,7 @@ public enum DeveloperCacheFinder {
                 var effects: [Suggestion.Effect] = []
                 for child in candidates {
                     let name = tree.name(of: child)
-                    let (markers, effect) = outputs[name]!
+                    let (markers, effect, _) = outputs[name]!
                     let isOutput: Bool
                     switch name {
                     case ".venv", "venv":

@@ -89,7 +89,8 @@ struct SuggestionsList<Header: View>: View {
         return sections.compactMap { section in
             guard section.byAge, let cutoff else { return section }
             let old = section.suggestions.filter { ($0.date ?? .distantPast) < cutoff }
-            return old.isEmpty ? nil : SuggestionSection(title: section.title, byAge: true, suggestions: old)
+            return old.isEmpty ? nil
+                : SuggestionSection(title: section.title, byAge: true, grouping: section.grouping, suggestions: old)
         }
     }
 

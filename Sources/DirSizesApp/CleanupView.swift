@@ -14,6 +14,7 @@ struct CleanupView: View {
     @AppStorage("cleanupShowsCheck") private var showsCheck = true
     @AppStorage("unusedAppsMonths") private var months = 6
     @AppStorage("developerProjectMonths") private var projectMonths = 3
+    @AppStorage("developerGroupsByKind") private var groupsByKind = false
     @AppStorage("oldFilesMonths") private var oldFilesMonths = 3
     @State private var selection = Set<CleanupRow.ID>()
     @FocusState private var listFocused: Bool
@@ -51,7 +52,14 @@ struct CleanupView: View {
                     }
                     .fixedSize()
                 case .developer:
-                    Picker("Projects untouched for", selection: $projectMonths) {
+                    Picker("Projects", selection: $groupsByKind) {
+                        Text("By Project").tag(false)
+                        Text("By Kind").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .fixedSize()
+                    .help("List build output per project, or all node_modules, .build, … folders together")
+                    Picker("Untouched for", selection: $projectMonths) {
                         Text("1 month").tag(1)
                         Text("3 months").tag(3)
                         Text("6 months").tag(6)
@@ -137,6 +145,8 @@ struct CleanupView: View {
                     Button("Scan Home Folder") { model.scan(path: NSHomeDirectory()) }
                 }
             } else {
+                let grouping: SuggestionSection.Grouping = groupsByKind ? .byKind : .byProject
+                let sections = sections.filter { $0.grouping == .always || $0.grouping == grouping }
                 SuggestionsList(sections: sections, months: projectMonths) {
                     SuggestionsHeader(title: "Developer caches and build output", sections: sections, text: """
                         Caches of Xcode, package managers and other tools, and build output and installed \
