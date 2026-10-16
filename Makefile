@@ -39,6 +39,11 @@ BUNDLE_ID ?= de.rnd7.dirsizes
 INSTALL_DIR ?= /Applications
 ICON       = Resources/AppIcon.icns
 ENTITLEMENTS = Resources/DirSizes.entitlements
+# Local builds are signed with the Developer ID when there is one: macOS then treats them as
+# the same app as the releases, so Full Disk Access and Photos access granted once stay granted
+# across rebuilds. Without one (or with LOCAL_IDENTITY=-) the signature is ad-hoc.
+LOCAL_IDENTITY ?= $(or $(shell security find-identity -v -p codesigning 2>/dev/null \
+	| grep -o '"Developer ID Application[^"]*"' | head -1 | tr -d '"'),-)
 
 .PHONY: all build run demo scan bench app open-app install icon screenshot clean \
 	release release-publish tap sign-check
@@ -50,11 +55,17 @@ build:
 
 # Runs the binary inside the bundle so the Dock shows the app icon.
 # Only scans when DIR is given on the command line; its default is for scan and bench.
+# Started through `open`, not by running the binary: macOS checks a process started from a
+# terminal against the terminal's permissions, so DirSizes' own Full Disk Access wouldn't
+# apply. A copy still running from an earlier build is quit first, since `open` would only
+# bring it to the front. Waits until the app quits.
 run: app
-	$(APP)/Contents/MacOS/$(APP_NAME) $(if $(filter command line,$(origin DIR)),-path $(DIR))
+	-@pkill -f "$(APP)/Contents/MacOS/$(APP_NAME)" && sleep 1
+	open -W $(APP) $(if $(filter command line,$(origin DIR)),--args -path $(DIR))
 
 demo: app
-	$(APP)/Contents/MacOS/$(APP_NAME) -demo YES
+	-@pkill -f "$(APP)/Contents/MacOS/$(APP_NAME)" && sleep 1
+	open -W $(APP) --args -demo YES
 
 scan: build
 	$(BIN_DIR)/dirsizes scan $(DIR) $(ARGS)
@@ -63,9 +74,10 @@ bench: build
 	$(BIN_DIR)/dirsizes bench $(DIR) $(ARGS)
 
 # A real bundle gets its own Dock icon, menu bar and its own entry under
-# System Settings > Privacy & Security > Full Disk Access. The signature is ad-hoc,
-# so macOS may ask for that permission again after a rebuild; `make release` re-signs
-# it with the Developer ID. The CLI ships inside it so the Homebrew cask can link it.
+# System Settings > Privacy & Security > Full Disk Access. Signed with the Developer ID
+# (see LOCAL_IDENTITY), it shares that permission with the releases; ad-hoc signed, macOS
+# may ask again after a rebuild. `make release` re-signs it for notarization. The CLI
+# ships inside it so the Homebrew cask can link it.
 app: build
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources/bin
@@ -83,9 +95,10 @@ app: build
 	plutil -insert LSApplicationCategoryType -string public.app-category.utilities $(APP)/Contents/Info.plist
 	plutil -insert NSHighResolutionCapable -bool true $(APP)/Contents/Info.plist
 	plutil -insert CFBundleIconFile -string AppIcon $(APP)/Contents/Info.plist
+	plutil -insert NSAppleEventsUsageDescription -string "DirSizes asks Finder to move items to the Trash that need your administrator password, such as apps from the App Store." $(APP)/Contents/Info.plist
 	plutil -insert NSPhotoLibraryUsageDescription -string "DirSizes adds up the sizes of your photos and videos to estimate what iCloud Photos stores. Nothing is changed or uploaded." $(APP)/Contents/Info.plist
-	codesign --force --sign - $(APP)/Contents/Resources/bin/dirsizes
-	codesign --force --sign - --entitlements $(ENTITLEMENTS) $(APP)
+	codesign --force --timestamp=none --sign "$(LOCAL_IDENTITY)" $(APP)/Contents/Resources/bin/dirsizes
+	codesign --force --timestamp=none --sign "$(LOCAL_IDENTITY)" --entitlements $(ENTITLEMENTS) $(APP)
 	@echo "Built $(APP)"
 
 open-app: app

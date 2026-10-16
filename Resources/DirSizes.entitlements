@@ -5,5 +5,8 @@
 	<!-- Reading the Photos library's file sizes for the iCloud Photos estimate (hardened runtime). -->
 	<key>com.apple.security.personal-information.photos-library</key>
 	<true/>
+	<!-- Asking Finder to trash items that need an administrator password (apps owned by root). -->
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
 </dict>
 </plist>

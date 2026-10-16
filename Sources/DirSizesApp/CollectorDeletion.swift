@@ -7,7 +7,9 @@ import Synchronization
 /// sizes from the scan, because one item can be a 4 KB file and the next a 6 GB folder.
 ///
 /// - Trash: `FileManager.trashItem` per item (keeps Finder's Put Back), four at a time. Each
-///   move is a rename, so bytes advance per item.
+///   move is a rename, so bytes advance per item. Items the user may not move (apps from the
+///   App Store or installer packages belong to root) are then handed to Finder together, which
+///   asks for an administrator password once, as when dragging them to the Trash there.
 /// - Permanent: the scan tree says what is inside each folder, so nothing has to be read from
 ///   disk first. Files are unlinked in batches by a pool of workers, across folders and items
 ///   at once: per-file cost dominates (measured ~150 µs a file here, with security software
@@ -55,6 +57,8 @@ final class CollectorDeletion: Sendable {
         var removed: [Int32] = []
         var failures: [String] = []
         var failedItems = Set<Int32>()
+        /// Trash moves refused for lack of permission, for Finder to try with authorization.
+        var needAuthorization: [Item] = []
     }
 
     /// Files per unlink batch: big enough to amortize reaching the folder, small enough to
@@ -86,6 +90,8 @@ final class CollectorDeletion: Sendable {
                 }
             }
             queue.waitUntilAllOperationsAreFinished()
+            let refused = state.withLock { $0.needAuthorization }
+            if !refused.isEmpty && !isCancelled { trashWithFinder(refused) }
             finished.store(true, ordering: .releasing)
         }
     }
@@ -120,9 +126,60 @@ final class CollectorDeletion: Sendable {
             // Already gone (e.g. deleted by another app) counts as done.
             if !FileManager.default.fileExists(atPath: item.path) {
                 finish(item, counted: 0)
+            } else if Self.isPermissionError(error) {
+                state.withLock { $0.needAuthorization.append(item) }
             } else {
                 fail(item.node, "\(name(of: item.path)): \(error.localizedDescription)")
             }
+        }
+    }
+
+    private static func isPermissionError(_ error: any Error) -> Bool {
+        let error = error as NSError
+        if error.domain == NSCocoaErrorDomain && error.code == NSFileWriteNoPermissionError { return true }
+        let posix = (error.userInfo[NSUnderlyingErrorKey] as? NSError) ?? error
+        return posix.domain == NSPOSIXErrorDomain && (posix.code == Int(EACCES) || posix.code == Int(EPERM))
+    }
+
+    /// Asks Finder to move `items` to the Trash in one go: it asks for an administrator password
+    /// where needed, and keeps Put Back. The first time, macOS asks whether DirSizes may
+    /// control Finder. Runs on the deletion thread, after the other items.
+    private func trashWithFinder(_ items: [Item]) {
+        setCurrent(items.count == 1 ? items[0].path : "\(items.count) items that need your password")
+        let files = items.map { item in
+            let escaped = item.path.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            return "POSIX file \"\(escaped)\""
+        }
+        let source = "tell application \"Finder\" to delete {\(files.joined(separator: ", "))}"
+        // osascript rather than NSAppleScript, which would block the main thread (and the UI)
+        // while Finder's password dialog is open. macOS still asks about DirSizes, which started it.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", source]
+        let errors = Pipe()
+        process.standardError = errors
+        process.standardOutput = FileHandle.nullDevice
+        var output = ""
+        if (try? process.run()) != nil {
+            output = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            process.waitUntilExit()
+        }
+        for item in items {
+            if !FileManager.default.fileExists(atPath: item.path) {
+                finish(item, counted: 0)
+                continue
+            }
+            // osascript reports "… (-128)" when the password was cancelled, "(-1743)" when
+            // DirSizes may not send Finder commands.
+            let reason = if output.contains("(-128)") {
+                "cancelled"
+            } else if output.contains("(-1743)") {
+                "DirSizes may not control Finder. Allow it in System Settings → Privacy & Security → Automation."
+            } else {
+                "you don't have permission to move it"
+            }
+            fail(item.node, "\(name(of: item.path)): \(reason)")
         }
     }
 

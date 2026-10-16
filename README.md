@@ -129,6 +129,11 @@ make scan DIR=~/dev    # command-line scan
 make bench DIR=~/dev   # compare against FileManager, fts and du
 ```
 
+With a Developer ID certificate in the keychain, `make app` signs with it, so local builds
+count as the same app as the releases and keep their Full Disk Access across rebuilds.
+Otherwise they are signed ad-hoc and macOS may ask again after each build
+(`LOCAL_IDENTITY=-` forces ad-hoc).
+
 ## Releasing
 
 ```sh

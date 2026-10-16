@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import DirScanner
 import Observation
 import SwiftUI
@@ -100,6 +101,9 @@ final class ScanModel {
     var showsCleanup = false
     /// Leftovers of uninstalled apps in the scan; nil until looked for.
     private(set) var leftovers: [Leftover]?
+    /// Installed apps with their size and when they were last used; nil until looked for.
+    private(set) var unusedApps: [UnusedApp]?
+    private(set) var findingUnusedApps = false
     private(set) var findingLeftovers = false
     private var installedApps: InstalledApps?
     private var isDemo = false
@@ -296,6 +300,7 @@ final class ScanModel {
         showsCollectorReview = false
         showsCleanup = false
         leftovers = nil
+        unusedApps = nil
         hovered = nil
         hoveredSpecial = nil
         loadVolumes()
@@ -462,6 +467,7 @@ final class ScanModel {
         showsCollectorReview = false
         showsCleanup = false
         leftovers = nil
+        unusedApps = nil
         filesScanned = 0
         bytesScanned = 0
         errors = 0
@@ -812,6 +818,45 @@ final class ScanModel {
         }
     }
 
+    /// The app folders the scan covers.
+    var scannedAppFolders: [String] {
+        guard let tree else { return [] }
+        return ["/Applications", "/Applications/Utilities", NSHomeDirectory() + "/Applications"].compactMap { path in
+            DataVolume.candidates(for: path).first { tree.node(atPath: $0) != nil }
+        }
+    }
+
+    /// Lists the scan's apps (not Apple's, not running ones) with their data, oldest use first.
+    /// Reading the app bundles' Info.plists and Spotlight takes a moment, so it runs off the
+    /// main thread.
+    func findUnusedApps() {
+        guard let tree, !findingUnusedApps else { return }
+        let folders = scannedAppFolders
+        let libraries = scannedLibraries
+        guard !folders.isEmpty else {
+            unusedApps = []
+            return
+        }
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier?.lowercased() })
+        findingUnusedApps = true
+        Task.detached(priority: .userInitiated) {
+            let found = tree.read {
+                UnusedAppFinder.find(in: $0, appFolders: folders, libraries: libraries, excluding: running,
+                                     lastUsed: Self.lastOpened)
+            }
+            await MainActor.run {
+                self.findingUnusedApps = false
+                if self.tree === tree { self.unusedApps = found }
+            }
+        }
+    }
+
+    /// When Spotlight saw the app opened last.
+    private nonisolated static func lastOpened(_ path: String) -> Date? {
+        guard let item = MDItemCreate(nil, path as CFString) else { return nil }
+        return MDItemCopyAttribute(item, kMDItemLastUsedDate) as? Date
+    }
+
     /// Like `displayPath`, but home-relative ("~/Library/Caches/…"), for paths in Library folders.
     func libraryPath(_ node: Int32) -> String {
         guard let tree else { return "" }
@@ -946,6 +991,7 @@ final class ScanModel {
         self.tree = tree
         segments = layout(center: center)
         if leftovers != nil { findLeftovers() }
+        if unusedApps != nil { findUnusedApps() }
     }
 }
 

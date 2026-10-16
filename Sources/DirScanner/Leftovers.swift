@@ -149,7 +149,7 @@ public enum LeftoverFinder {
     ]
 
     /// Where apps keep their data, relative to a Library folder, and how entries there are named.
-    private static let locations: [(path: String, naming: Naming)] = [
+    static let locations: [(path: String, naming: Naming)] = [
         ("Application Support", .identifierOrName),
         ("Caches", .identifier),
         ("Containers", .identifier),
@@ -253,6 +253,11 @@ public enum LeftoverFinder {
             // Group the app's helpers with it: "com.foo.app.helper" under "com.foo.app".
             let key = lower.split(separator: ".").prefix(3).joined(separator: ".")
             if installed.contains(identifier: key) { return nil }
+            // Command-line tools name their data like apps do: "org.swift.swiftpm" is the swift
+            // tool's, "com.docker.socket" docker's. With a tool named like the vendor installed,
+            // it is in use. (Only the vendor: app parts such as "install" or "softwareupdate"
+            // would match macOS's own commands.)
+            if hasCommandLineTool(named: String(lower.split(separator: ".")[1])) { return nil }
             return (key, displayName(of: id), installed.hasVendor(of: lower) ? .check : .likely)
         }
         // App folders are named like apps ("LM Studio"); tools use lowercase ("gopls").
@@ -311,8 +316,14 @@ public enum LeftoverFinder {
         return folders
     }()
 
+    /// An executable file of that name in one of the tool folders (not a folder named so).
     private static func hasCommandLineTool(named name: String) -> Bool {
         let tool = name.lowercased()
-        return toolFolders.contains { FileManager.default.fileExists(atPath: $0 + "/" + tool) }
+        return toolFolders.contains { folder in
+            var isDirectory: ObjCBool = false
+            let path = folder + "/" + tool
+            return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && !isDirectory.boolValue
+                && FileManager.default.isExecutableFile(atPath: path)
+        }
     }
 }
