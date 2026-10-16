@@ -70,7 +70,7 @@ struct ContentView: View {
                 }
                 Button("Open…", systemImage: "folder") { model.chooseFolder() }
                 Button("Cleanup", systemImage: "lightbulb") { model.showCleanup() }
-                    .help("Find data left behind by uninstalled apps, and apps you no longer use")
+                    .help("Find data left behind by uninstalled apps, apps you no longer use, developer caches, old downloads, and what grew since an earlier scan")
                     .disabled(model.tree == nil || model.phase == .scanning)
                 Button("Use with Claude", systemImage: "sparkles") { showsMCPSetup.toggle() }
                     .help("Connect Claude Code to DirSizes")
@@ -262,6 +262,7 @@ private struct SpecialDetails: View {
             case .hidden:
                 note("Used on the disk, but not seen by the scan: the system volume, APFS snapshots (Time Machine), "
                      + "swap and sleep image, and folders DirSizes couldn't read.")
+                HiddenDetails()
                 let unreadable = model.unreadableFolders
                 if !unreadable.isEmpty {
                     note("\(unreadable.count.formatted()) folders couldn't be read. \(model.unreadableHint)")
@@ -311,6 +312,66 @@ private struct SpecialDetails: View {
               let members = model.iCloudUsage?.familyStorageUsageInfo?.storageUsageByMember, !members.isEmpty
         else { return nil }
         return members.sorted { $0.usageInBytes > $1.usageInBytes }
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// The hidden space by what it is: the disk's other volumes, and the rest, which is in the
+/// scanned volume but not in its files.
+private struct HiddenDetails: View {
+    @Environment(ScanModel.self) private var model
+    @State private var confirmsDeletion = false
+    @State private var deleting = false
+    @State private var error: String?
+
+    var body: some View {
+        Group {
+            if let hidden = model.hiddenSpace {
+                ForEach(hidden.volumes) { part in
+                    detail(part.name, part.bytes, icon: part.icon)
+                        .help(part.note)
+                }
+                let total = model.extras.first { $0.0 == .hidden }?.1 ?? 0
+                detail("Snapshots and unread folders", max(total - hidden.volumesTotal, 0), icon: "eye.slash")
+                    .help("In \(model.rootName) but not in its files: local snapshots, folders that couldn't be read, "
+                          + "and file system data. Estimated as what's left.")
+                if let swap = hidden.swapUsed, swap > 0 {
+                    note("Swap in use now: \(formatBytes(swap)).")
+                }
+                if let oldest = hidden.snapshots.first {
+                    note("\(hidden.snapshots.count) local Time Machine \(hidden.snapshots.count == 1 ? "snapshot" : "snapshots"), "
+                         + "the oldest from \(oldest.formatted(.relative(presentation: .named))). They keep earlier versions "
+                         + "of your files until the next backup; macOS deletes them on its own when space runs low, "
+                         + "and counts them as free space.")
+                    Button(deleting ? "Deleting Snapshots…" : "Delete Local Snapshots…") { confirmsDeletion = true }
+                        .buttonStyle(.link)
+                        .disabled(deleting)
+                        .confirmationDialog("Delete all local Time Machine snapshots?", isPresented: $confirmsDeletion) {
+                            Button("Delete Snapshots", role: .destructive) {
+                                deleting = true
+                                Task {
+                                    error = await model.deleteLocalSnapshots()
+                                    deleting = false
+                                }
+                            }
+                        } message: {
+                            Text("Backups on your Time Machine disk aren't affected. Until the next backup, earlier versions "
+                                 + "of files changed since the last one can't be restored. Asks for an administrator password.")
+                        }
+                }
+                if let error {
+                    note(error)
+                }
+            } else if model.loadingHiddenSpace {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .onAppear { model.loadHiddenSpace() }
     }
 
     private func note(_ text: String) -> some View {

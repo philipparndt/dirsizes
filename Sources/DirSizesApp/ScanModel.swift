@@ -57,6 +57,9 @@ final class ScanModel {
     private(set) var volumes: [VolumeInfo] = []
     /// Set when a whole disk is scanned; enables free and hidden space in the chart.
     private(set) var scannedVolume: VolumeInfo?
+    /// What the scanned disk's hidden space is made of; nil until looked up.
+    private(set) var hiddenSpace: HiddenSpace?
+    private(set) var loadingHiddenSpace = false
     /// Hovered free or hidden space segment.
     var hoveredSpecial: SpecialSpace?
     private(set) var tree: FileTree?
@@ -105,6 +108,17 @@ final class ScanModel {
     private(set) var unusedApps: [UnusedApp]?
     private(set) var findingUnusedApps = false
     private(set) var findingLeftovers = false
+    /// Caches of developer tools and build output in projects; nil until looked for.
+    private(set) var developerCaches: [SuggestionSection]?
+    private(set) var findingDeveloperCaches = false
+    /// Old downloads, device backups and device software; nil until looked for.
+    private(set) var oldFiles: [SuggestionSection]?
+    private(set) var findingOldFiles = false
+    /// Earlier scans' sizes to compare with, newest first; nil until looked for.
+    private(set) var sizeSnapshots: [(date: Date, rootPath: String, url: URL)]?
+    /// What changed since the snapshot at `base`.
+    private(set) var sizeChanges: (base: URL, total: (old: Int64, new: Int64), changes: [SizeChange])?
+    private(set) var findingSizeChanges = false
     private var installedApps: InstalledApps?
     private var isDemo = false
     /// The Full Disk Access sheet is up; `pendingScan` runs once it is answered.
@@ -292,6 +306,7 @@ final class ScanModel {
         phase = .idle
         rootPath = nil
         scannedVolume = nil
+        hiddenSpace = nil
         tree = nil
         segments = []
         transition = nil
@@ -301,6 +316,10 @@ final class ScanModel {
         showsCleanup = false
         leftovers = nil
         unusedApps = nil
+        developerCaches = nil
+        oldFiles = nil
+        sizeSnapshots = nil
+        sizeChanges = nil
         hovered = nil
         hoveredSpecial = nil
         loadVolumes()
@@ -456,6 +475,7 @@ final class ScanModel {
         cloudBytes = []
         rootPath = scanner.rootPath
         scannedVolume = nil
+        hiddenSpace = nil
         hoveredSpecial = nil
         phase = .scanning
         tree = nil
@@ -468,6 +488,10 @@ final class ScanModel {
         showsCleanup = false
         leftovers = nil
         unusedApps = nil
+        developerCaches = nil
+        oldFiles = nil
+        sizeSnapshots = nil
+        sizeChanges = nil
         filesScanned = 0
         bytesScanned = 0
         errors = 0
@@ -535,7 +559,13 @@ final class ScanModel {
         if !scanner.isCancelled && !scanner.countsCloudFiles {
             scanInfo = result.info
             // Saved for an incremental scan next time, also after the app was quit.
+            let rootPath = scanner.rootPath
             Task.detached(priority: .utility) {
+                // The first time, the saved scan this one replaces is the one to compare with.
+                if SizeHistory.available(covering: rootPath).isEmpty, let (old, info) = ScanCache.load(rootPath: rootPath) {
+                    SizeHistory.record(old, date: info.date)
+                }
+                result.tree.read { SizeHistory.record($0) }
                 DiskScanner.save(result)
                 await MainActor.run { self.refreshSavedScans() }
             }
@@ -851,6 +881,101 @@ final class ScanModel {
         }
     }
 
+    /// The home folder's path in the scan, if the scan covers it.
+    var scannedHome: String? {
+        guard let tree, !isDemo else { return nil }
+        return DataVolume.candidates(for: NSHomeDirectory()).first { tree.node(atPath: $0) != nil }
+    }
+
+    /// Where to look for projects: the home folder, or the scanned folder when it is inside it.
+    private var projectsRoot: Int32? {
+        guard let tree, !isDemo else { return nil }
+        if let home = scannedHome { return tree.node(atPath: home) }
+        let root = DataVolume.displayPath(tree.path(of: 0))
+        return root.hasPrefix(NSHomeDirectory() + "/") ? 0 : nil
+    }
+
+    func findDeveloperCaches() {
+        guard let tree, !findingDeveloperCaches else { return }
+        let home = scannedHome
+        let projects = projectsRoot
+        findingDeveloperCaches = true
+        Task.detached(priority: .userInitiated) {
+            let found = tree.read { DeveloperCacheFinder.find(in: $0, home: home, projects: projects) }
+            await MainActor.run {
+                self.findingDeveloperCaches = false
+                if self.tree === tree { self.developerCaches = found }
+            }
+        }
+    }
+
+    func findOldFiles() {
+        guard let tree, !findingOldFiles else { return }
+        guard let home = scannedHome else {
+            oldFiles = []
+            return
+        }
+        findingOldFiles = true
+        Task.detached(priority: .userInitiated) {
+            let found = tree.read { OldFileFinder.find(in: $0, home: home) }
+            await MainActor.run {
+                self.findingOldFiles = false
+                if self.tree === tree { self.oldFiles = found }
+            }
+        }
+    }
+
+    /// Looks up what the hidden space is made of (other volumes, snapshots, swap), again each
+    /// time, since it changes while the Mac runs.
+    func loadHiddenSpace() {
+        guard let volume = scannedVolume, !loadingHiddenSpace else { return }
+        loadingHiddenSpace = true
+        Task.detached(priority: .userInitiated) {
+            let found = HiddenSpace.load(volumePath: volume.scanPath)
+            await MainActor.run {
+                self.loadingHiddenSpace = false
+                if self.scannedVolume?.url == volume.url { self.hiddenSpace = found }
+            }
+        }
+    }
+
+    /// Deletes the startup disk's local Time Machine snapshots; returns an error message.
+    func deleteLocalSnapshots() async -> String? {
+        let error = await HiddenSpace.deleteLocalSnapshots()
+        if let volume = scannedVolume { scannedVolume = Self.refreshed(volume) }
+        segments = layout(center: center)
+        loadHiddenSpace()
+        return error
+    }
+
+    /// Compares the scan with an earlier one: `base`, or else the newest from before this scan.
+    func findSizeChanges(since base: URL? = nil) {
+        guard let tree, !findingSizeChanges, let rootPath else { return }
+        let started = scanInfo?.date ?? Date()
+        findingSizeChanges = true
+        Task.detached(priority: .userInitiated) {
+            let snapshots = SizeHistory.available(covering: rootPath).filter { $0.date < started }
+            let chosen = snapshots.first { $0.url == base } ?? snapshots.first
+            let result = chosen.flatMap { SizeHistory.load($0.url) }.map { snapshot in
+                tree.read { tree in
+                    let root = DataVolume.displayPath(tree.path(of: 0))
+                    return (total: (old: snapshot.size(of: root), new: tree.root.size),
+                            changes: SizeChange.compare(tree, with: snapshot))
+                }
+            }
+            await MainActor.run {
+                self.findingSizeChanges = false
+                guard self.tree === tree else { return }
+                self.sizeSnapshots = snapshots
+                if let chosen, let result {
+                    self.sizeChanges = (base: chosen.url, total: result.total, changes: result.changes)
+                } else {
+                    self.sizeChanges = nil
+                }
+            }
+        }
+    }
+
     /// When Spotlight saw the app opened last.
     private nonisolated static func lastOpened(_ path: String) -> Date? {
         guard let item = MDItemCreate(nil, path as CFString) else { return nil }
@@ -992,6 +1117,9 @@ final class ScanModel {
         segments = layout(center: center)
         if leftovers != nil { findLeftovers() }
         if unusedApps != nil { findUnusedApps() }
+        if developerCaches != nil { findDeveloperCaches() }
+        if oldFiles != nil { findOldFiles() }
+        if let sizeChanges { findSizeChanges(since: sizeChanges.base) }
     }
 }
 

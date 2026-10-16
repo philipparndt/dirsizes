@@ -2,17 +2,19 @@ import DirScanner
 import SwiftUI
 
 /// Cleanup suggestions from the scan: data left behind by apps that are no longer installed,
-/// and apps that haven't been used for a while. Suggestions only go into the collector;
+/// apps that haven't been used for a while, developer caches, and old downloads and backups. Suggestions only go into the collector;
 /// deleting stays with the collector.
 struct CleanupView: View {
     enum Tab: String {
-        case leftBehind, unusedApps
+        case leftBehind, unusedApps, developer, oldFiles, changes
     }
 
     @Environment(ScanModel.self) private var model
     @AppStorage("cleanupTab") private var tab = Tab.leftBehind
     @AppStorage("cleanupShowsCheck") private var showsCheck = true
     @AppStorage("unusedAppsMonths") private var months = 6
+    @AppStorage("developerProjectMonths") private var projectMonths = 3
+    @AppStorage("oldFilesMonths") private var oldFilesMonths = 3
     @State private var selection = Set<CleanupRow.ID>()
     @FocusState private var listFocused: Bool
 
@@ -26,6 +28,9 @@ struct CleanupView: View {
                 Picker("", selection: $tab) {
                     Text("Left Behind").tag(Tab.leftBehind)
                     Text("Unused Apps").tag(Tab.unusedApps)
+                    Text("Developer").tag(Tab.developer)
+                    Text("Old Files").tag(Tab.oldFiles)
+                    Text("Changes").tag(Tab.changes)
                 }
                 .pickerStyle(.segmented)
                 .fixedSize()
@@ -45,6 +50,36 @@ struct CleanupView: View {
                         Text("Any time").tag(0)
                     }
                     .fixedSize()
+                case .developer:
+                    Picker("Projects untouched for", selection: $projectMonths) {
+                        Text("1 month").tag(1)
+                        Text("3 months").tag(3)
+                        Text("6 months").tag(6)
+                        Text("1 year").tag(12)
+                        Text("Any time").tag(0)
+                    }
+                    .fixedSize()
+                case .oldFiles:
+                    Picker("Older than", selection: $oldFilesMonths) {
+                        Text("1 month").tag(1)
+                        Text("3 months").tag(3)
+                        Text("6 months").tag(6)
+                        Text("1 year").tag(12)
+                        Text("Any time").tag(0)
+                    }
+                    .fixedSize()
+                case .changes:
+                    if let snapshots = model.sizeSnapshots, snapshots.count > 1 {
+                        Picker("Compared with", selection: Binding(
+                            get: { model.sizeChanges?.base },
+                            set: { if let url = $0 { model.findSizeChanges(since: url) } })) {
+                            ForEach(snapshots, id: \.url) { snapshot in
+                                Text(snapshot.date.formatted(date: .abbreviated, time: .shortened))
+                                    .tag(Optional(snapshot.url))
+                            }
+                        }
+                        .fixedSize()
+                    }
                 }
             }
             .padding(.horizontal, 12)
@@ -55,11 +90,14 @@ struct CleanupView: View {
                 switch tab {
                 case .leftBehind: content
                 case .unusedApps: UnusedAppsList(months: months)
+                case .developer: developer
+                case .oldFiles: oldFiles
+                case .changes: ChangesList()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onAppear { if tab == .unusedApps && model.unusedApps == nil { model.findUnusedApps() } }
-            .onChange(of: tab) { if tab == .unusedApps && model.unusedApps == nil { model.findUnusedApps() } }
+            .onAppear(perform: load)
+            .onChange(of: tab, load)
 
             Divider()
             HStack {
@@ -74,6 +112,71 @@ struct CleanupView: View {
             .padding(12)
         }
         .onExitCommand { model.showsCleanup = false }
+    }
+
+    /// Looks for the tab's suggestions the first time it's shown.
+    private func load() {
+        switch tab {
+        case .leftBehind: break
+        case .unusedApps: if model.unusedApps == nil { model.findUnusedApps() }
+        case .developer: if model.developerCaches == nil { model.findDeveloperCaches() }
+        case .oldFiles: if model.oldFiles == nil { model.findOldFiles() }
+        case .changes: if model.sizeSnapshots == nil { model.findSizeChanges() }
+        }
+    }
+
+    @ViewBuilder
+    private var developer: some View {
+        if let sections = model.developerCaches, !model.findingDeveloperCaches {
+            if sections.isEmpty {
+                ContentUnavailableView {
+                    Label("No developer caches in this scan", systemImage: "hammer")
+                } description: {
+                    Text("Developer tools keep their caches in your home folder, and projects their build output. Scan your home folder or the startup disk to find them.")
+                } actions: {
+                    Button("Scan Home Folder") { model.scan(path: NSHomeDirectory()) }
+                }
+            } else {
+                SuggestionsList(sections: sections, months: projectMonths) {
+                    SuggestionsHeader(title: "Developer caches and build output", sections: sections, text: """
+                        Caches of Xcode, package managers and other tools, and build output and installed \
+                        packages inside your projects (projects untouched the longest first). The badge says \
+                        what removing it means: rebuilt or downloaded again when needed, or gone. Hover over \
+                        a row for details. Quit the tool first when it's running.
+                        """)
+                }
+            }
+        } else {
+            ProgressView("Looking for caches and projects…")
+        }
+    }
+
+    @ViewBuilder
+    private var oldFiles: some View {
+        if let sections = model.oldFiles, !model.findingOldFiles {
+            if model.scannedHome == nil {
+                ContentUnavailableView {
+                    Label("No home folder in this scan", systemImage: "arrow.down.circle")
+                } description: {
+                    Text("Scan your home folder or the startup disk to find old downloads, device backups and device software.")
+                } actions: {
+                    Button("Scan Home Folder") { model.scan(path: NSHomeDirectory()) }
+                }
+            } else if sections.isEmpty {
+                ContentUnavailableView("No old files", systemImage: "checkmark.seal",
+                                       description: Text("Downloads is empty, and there are no device backups or software updates."))
+            } else {
+                SuggestionsList(sections: sections, months: oldFilesMonths) {
+                    SuggestionsHeader(title: "Old downloads and backups", sections: sections, text: """
+                        What's in Downloads, by when you downloaded it, oldest first; iPhone and iPad backups \
+                        made on this Mac; and device software downloaded for updates. Installers can go once \
+                        the app is installed; look at archives and other downloads before removing them.
+                        """)
+                }
+            }
+        } else {
+            ProgressView("Looking at your downloads…")
+        }
     }
 
     @ViewBuilder
@@ -455,7 +558,7 @@ private struct AppItemRow: View {
 }
 
 /// Whether the nodes are in the collector (all, some, none); a click adds or removes them all.
-private struct CollectCheckbox: View {
+struct CollectCheckbox: View {
     @Environment(ScanModel.self) private var model
     let nodes: [Int32]
 
