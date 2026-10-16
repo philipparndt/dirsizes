@@ -212,12 +212,13 @@ private struct SpecialRow: View {
                 .frame(height: 3)
             }
             .padding(.vertical, 2)
+            // Only the title line: the details below aren't part of the highlight.
+            .background(model.hoveredSpecial == kind ? Color.accentColor.opacity(0.12) : .clear)
             .contentShape(Rectangle())
             .onTapGesture { expanded.toggle() }
-        }
-        .background(model.hoveredSpecial == kind ? Color.accentColor.opacity(0.12) : .clear)
-        .onHover { inside in
-            if inside { model.hoveredSpecial = kind } else if model.hoveredSpecial == kind { model.hoveredSpecial = nil }
+            .onHover { inside in
+                if inside { model.hoveredSpecial = kind } else if model.hoveredSpecial == kind { model.hoveredSpecial = nil }
+            }
         }
     }
 
