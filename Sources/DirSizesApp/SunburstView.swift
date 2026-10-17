@@ -189,6 +189,9 @@ struct SunburstView: View {
     /// iCloud's colors (the rest of Documents in gray).
     static func fillSpecial(_ kind: SpecialSpace, path: Path, highlighted: Bool, tint: Color? = nil,
                             opacity: Double = 1, in context: inout GraphicsContext) {
+        // Solid like folders: the see-through fills below are laid over the window's background,
+        // so what's underneath doesn't show through while zooming.
+        context.fill(path, with: .color(Color(nsColor: .windowBackgroundColor).opacity(opacity)))
         switch kind {
         case .iCloud:
             let fill = tint ?? .gray
