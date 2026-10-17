@@ -85,8 +85,6 @@ struct Segment {
     let start: Double
     let end: Double
     var special: SpecialSpace?
-    /// Rings the segment spans: opened hidden or free space fills the chart with its parts.
-    var thickness = 1.0
     /// 0...1, from the item's position in the root chart, so colors stay the same when zooming.
     var hue: Double = 0
 
@@ -125,11 +123,11 @@ struct SunburstGeometry {
 
     /// The ring segment shape. `depth` may be fractional (during animations); the part beyond
     /// the outermost ring is clipped, and nil is returned when nothing is left.
-    func wedge(start: Double, end: Double, depth: Double, thickness: Double = 1) -> Path? {
+    func wedge(start: Double, end: Double, depth: Double) -> Path? {
         let limit = outerRadius
         let inner = innerRadius + CGFloat(depth - 1) * ringWidth
         guard inner < limit else { return nil }
-        let outer = min(inner + ringWidth * CGFloat(thickness), limit)
+        let outer = min(inner + ringWidth, limit)
 
         // Shift by -90° so angle 0 is at the top; increasing angles run clockwise on screen.
         let from = Angle(radians: start - .pi / 2)
@@ -157,8 +155,7 @@ struct SunburstGeometry {
         var angle = atan2(Double(dy), Double(dx)) + .pi / 2
         if angle < 0 { angle += 2 * .pi }
         return segments
-            .first { $0.depth <= depth && Double(depth) < Double($0.depth) + $0.thickness
-                && $0.start <= angle && angle < $0.end }
+            .first { $0.depth == depth && $0.start <= angle && angle < $0.end }
             .map { segment in segment.special.map(Hit.special) ?? .segment(segment.node) }
     }
 }
@@ -245,8 +242,8 @@ enum SunburstLayout {
         return result
     }
 
-    /// Opened hidden or free space: its parts around the whole circle, through all `rings`.
-    static func segments(parts: [(SpecialSpace, Int64)], rings: Int) -> [Segment] {
+    /// Opened hidden space: its parts around the whole circle.
+    static func segments(parts: [(SpecialSpace, Int64)]) -> [Segment] {
         let total = Double(parts.reduce(0) { $0 + $1.1 })
         guard total > 0 else { return [] }
         var result: [Segment] = []
@@ -254,8 +251,7 @@ enum SunburstLayout {
         for (part, bytes) in parts {
             let sweep = 2 * .pi * Double(bytes) / total
             if sweep >= minAngle {
-                result.append(Segment(node: -1, depth: 1, start: angle, end: angle + sweep, special: part,
-                                      thickness: Double(rings)))
+                result.append(Segment(node: -1, depth: 1, start: angle, end: angle + sweep, special: part))
             }
             angle += sweep
         }

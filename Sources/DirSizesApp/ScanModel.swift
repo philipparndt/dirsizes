@@ -786,7 +786,7 @@ final class ScanModel {
 
     private func layout(center: Int32) -> [Segment] {
         guard let tree else { return [] }
-        if center == 0, let parts = openedParts { return SunburstLayout.segments(parts: parts, rings: Self.rings) }
+        if center == 0, let parts = openedParts { return SunburstLayout.segments(parts: parts) }
         var fixedHues: [Int32: Double] = [:]
         if let node = photosLibraryNode, let hue = color(of: .photosInCloud).flatMap(Self.hue) { fixedHues[node] = hue }
         return SunburstLayout.segments(tree: tree, center: center, rings: Self.rings, extras: extras,
