@@ -13,6 +13,10 @@ enum SpecialSpace: Hashable, Sendable {
     /// The part of iCloud Photos that isn't in the Photos library on this Mac, when the library
     /// is charted next to iCloud Drive.
     case photosInCloud
+    /// A part of hidden space, in the ring outside it: another volume by name, or "rest".
+    case hiddenPart(String)
+    /// The part of free space macOS frees on its own, in the ring outside free space.
+    case purgeable
 
     /// Identifies the segment across layouts.
     var key: String {
@@ -21,6 +25,8 @@ enum SpecialSpace: Hashable, Sendable {
         case .free: "\u{1}free"
         case .iCloud(let key): "\u{1}icloud:" + key
         case .photosInCloud: "\u{1}icloud:photos/cloud"
+        case .hiddenPart(let name): "\u{1}hidden/" + name
+        case .purgeable: "\u{1}free/purgeable"
         }
     }
 }
@@ -155,11 +161,13 @@ enum SunburstLayout {
         return total > 0 ? 2 * .pi * scanned / total : 2 * .pi
     }
 
-    /// `extras` (free and hidden space) are only shown when centered on the root.
+    /// `extras` (free and hidden space) are only shown when centered on the root, and
+    /// `extraParts` in the ring outside the extra they're part of.
     /// Items in `fixedHues` (and everything inside them) get that hue instead of one from their
     /// position, such as the Photos library in iCloud's color for Photos.
     static func segments(tree: FileTree, center: Int32, rings: Int,
                          extras: [(SpecialSpace, Int64)] = [],
+                         extraParts: [SpecialSpace: [(SpecialSpace, Int64)]] = [:],
                          fixedHues: [Int32: Double] = [:]) -> [Segment] {
         var result: [Segment] = []
 
@@ -206,6 +214,16 @@ enum SunburstLayout {
             let sweep = 2 * .pi * Double(bytes) / total
             if sweep >= minAngle {
                 result.append(Segment(node: -1, depth: 1, start: angle, end: angle + sweep, special: kind))
+                var partAngle = angle
+                for (part, partBytes) in extraParts[kind] ?? [] where bytes > 0 && rings > 1 {
+                    let partSweep = sweep * Double(min(partBytes, bytes)) / Double(bytes)
+                    // Never beyond the end of the wedge it's part of.
+                    let end = min(partAngle + partSweep, angle + sweep)
+                    if end - partAngle >= minAngle {
+                        result.append(Segment(node: -1, depth: 2, start: partAngle, end: end, special: part))
+                    }
+                    partAngle = end
+                }
             }
             angle += sweep
         }

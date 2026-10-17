@@ -22,6 +22,13 @@ struct HiddenSpace: Sendable {
 
     var volumesTotal: Int64 { volumes.reduce(0) { $0 + $1.bytes } }
 
+    /// The name of what's left of hidden space after the other volumes: in the scanned volume,
+    /// but not in its files.
+    static let rest = "\u{1}rest"
+    static let restNote = "In the scanned volume but not in its files: folders that couldn't be read, and file "
+        + "system data. Estimated as what's left. macOS counts most of the space of local snapshots as "
+        + "purgeable, so it's in free space."
+
     /// Asks diskutil (and tmutil for snapshots of the startup disk). Takes a moment.
     static func load(volumePath: String) -> HiddenSpace? {
         guard let info = plist(["info", "-plist", volumePath]),

@@ -202,6 +202,15 @@ struct SunburstView: View {
         case .hidden:
             context.fill(path, with: .color(.gray.opacity((highlighted ? 0.75 : 0.5) * opacity)))
             context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor).opacity(opacity)), lineWidth: 0.75)
+        case .hiddenPart:
+            // Lighter than hidden space, like an outer ring of a folder.
+            context.fill(path, with: .color(.gray.opacity((highlighted ? 0.6 : 0.35) * opacity)))
+            context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor).opacity(opacity)), lineWidth: 0.75)
+        case .purgeable:
+            // Free space with something in it for now.
+            context.fill(path, with: .color(.primary.opacity((highlighted ? 0.18 : 0.1) * opacity)))
+            context.stroke(path, with: .color(.secondary.opacity(0.5 * opacity)),
+                           style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
         }
     }
 
@@ -345,6 +354,9 @@ extension CenterLabel {
         case .iCloud("docs"): "in iCloud, but not as files in iCloud Drive (app data, iCloud Drive's trash, …)"
         case .iCloud: "in iCloud; not files on this Mac"
         case .photosInCloud: "not downloaded to this Mac"
+        case .hiddenPart(HiddenSpace.rest): "unreadable folders, file system data"
+        case .hiddenPart: "a volume on this disk"
+        case .purgeable: "counted as free; macOS frees it when needed"
         }
     }
 }

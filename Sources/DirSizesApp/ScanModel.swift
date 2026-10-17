@@ -208,7 +208,24 @@ final class ScanModel {
     }
 
     func bytes(of special: SpecialSpace) -> Int64 {
-        (phase == .scanning ? liveExtras : extras).first { $0.0 == special }?.1 ?? 0
+        let shown = phase == .scanning ? liveExtras : extras + extraParts.values.joined()
+        return shown.first { $0.0 == special }?.1 ?? 0
+    }
+
+    /// What hidden and free space are made of, for the ring outside them: the disk's other
+    /// volumes and the rest; the purgeable part of free space. Only for finished disk scans.
+    var extraParts: [SpecialSpace: [(SpecialSpace, Int64)]] {
+        guard phase == .done, let volume = scannedVolume else { return [:] }
+        var parts: [SpecialSpace: [(SpecialSpace, Int64)]] = [:]
+        if let hiddenSpace {
+            let hidden = extras.first { $0.0 == .hidden }?.1 ?? 0
+            parts[.hidden] = hiddenSpace.volumes.map { (.hiddenPart($0.name), $0.bytes) }
+                + [(.hiddenPart(HiddenSpace.rest), max(hidden - hiddenSpace.volumesTotal, 0))]
+        }
+        if volume.purgeableBytes > 0 {
+            parts[.free] = [(.purgeable, volume.purgeableBytes)]
+        }
+        return parts
     }
 
     /// Why folders couldn't be read: without Full Disk Access, that's the likely reason; with
@@ -235,6 +252,9 @@ final class ScanModel {
         case .iCloud("docs"): phase == .scanning ? "Not scanned yet" : "Other documents and app data"
         case .iCloud(let key): iCloudMedia(key)?.displayLabel ?? key
         case .photosInCloud: "Photos only in iCloud"
+        case .hiddenPart(HiddenSpace.rest): "Unread folders and system data"
+        case .hiddenPart(let name): name
+        case .purgeable: "Purgeable"
         }
     }
 
@@ -243,7 +263,7 @@ final class ScanModel {
         let key = switch special {
         case .iCloud(let key): key
         case .photosInCloud: "photos"
-        case .free, .hidden: ""
+        case .free, .hidden, .hiddenPart, .purgeable: ""
         }
         return iCloudMedia(key).map(ICloudStorage.color)
     }
@@ -590,7 +610,10 @@ final class ScanModel {
             }
         }
         startMonitoring(result.tree, rootPath: scanner.rootPath)
-        if !scanner.isCancelled { findQuickSuggestions() }
+        if !scanner.isCancelled {
+            findQuickSuggestions()
+            loadHiddenSpace()
+        }
     }
 
     /// Progress estimates are kept apart for scans counting cloud files: their totals differ.
@@ -755,7 +778,7 @@ final class ScanModel {
         var fixedHues: [Int32: Double] = [:]
         if let node = photosLibraryNode, let hue = color(of: .photosInCloud).flatMap(Self.hue) { fixedHues[node] = hue }
         return SunburstLayout.segments(tree: tree, center: center, rings: Self.rings, extras: extras,
-                                       fixedHues: fixedHues)
+                                       extraParts: extraParts, fixedHues: fixedHues)
     }
 
     private static func hue(of color: Color) -> Double? {
@@ -971,7 +994,10 @@ final class ScanModel {
             let found = HiddenSpace.load(volumePath: volume.scanPath)
             await MainActor.run {
                 self.loadingHiddenSpace = false
-                if self.scannedVolume?.url == volume.url { self.hiddenSpace = found }
+                guard self.scannedVolume?.url == volume.url else { return }
+                self.hiddenSpace = found
+                // Its parts are in the ring outside hidden space.
+                if self.phase == .done { self.segments = self.layout(center: self.center) }
             }
         }
     }

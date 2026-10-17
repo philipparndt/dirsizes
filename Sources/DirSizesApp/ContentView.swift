@@ -227,8 +227,8 @@ private struct SpecialRow: View {
 
     private var tint: Color {
         switch kind {
-        case .free: .secondary
-        case .hidden: .gray
+        case .free, .purgeable: .secondary
+        case .hidden, .hiddenPart: .gray
         case .iCloud, .photosInCloud: model.color(of: kind) ?? .gray
         }
     }
@@ -236,7 +236,8 @@ private struct SpecialRow: View {
     private var icon: String {
         switch kind {
         case .free: "circle.dashed"
-        case .hidden: "eye.slash"
+        case .hidden, .hiddenPart: "eye.slash"
+        case .purgeable: "arrow.3.trianglepath"
         case .iCloud(let key):
             switch key {
             case "photos": "photo.on.rectangle"
@@ -260,9 +261,14 @@ private struct SpecialDetails: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             switch kind {
-            case .free:
+            case .free, .purgeable:
                 note(model.iCloudUsage != nil ? "Left in your iCloud plan." : "Available on \(model.rootName).")
-            case .hidden:
+                if model.iCloudUsage == nil, let purgeable = model.extraParts[.free]?.first?.1 {
+                    detail("Purgeable", purgeable, icon: "arrow.3.trianglepath")
+                        .help("Counted as free: macOS frees it on its own when space runs low. Mostly local "
+                              + "Time Machine snapshots, also caches and files that are also in iCloud.")
+                }
+            case .hidden, .hiddenPart:
                 note("Used on the disk, but not seen by the scan: the system volume, APFS snapshots (Time Machine), "
                      + "swap and sleep image, and folders DirSizes couldn't read.")
                 HiddenDetails()
@@ -340,9 +346,8 @@ private struct HiddenDetails: View {
                         .help(part.note)
                 }
                 let total = model.extras.first { $0.0 == .hidden }?.1 ?? 0
-                detail("Snapshots and unread folders", max(total - hidden.volumesTotal, 0), icon: "eye.slash")
-                    .help("In \(model.rootName) but not in its files: local snapshots, folders that couldn't be read, "
-                          + "and file system data. Estimated as what's left.")
+                detail(model.label(of: .hiddenPart(HiddenSpace.rest)), max(total - hidden.volumesTotal, 0), icon: "eye.slash")
+                    .help(HiddenSpace.restNote)
                 if let swap = hidden.swapUsed, swap > 0 {
                     note("Swap in use now: \(formatBytes(swap)).")
                 }

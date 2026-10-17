@@ -45,6 +45,11 @@ struct DirSizesApp: App {
                             // A fixed size, not whatever frame macOS restored for this machine.
                             NSApp.windows.first?.setContentSize(NSSize(width: 1100, height: 700))
                             try? await Task.sleep(for: .seconds(1.5))
+                            // With `-path`, after the scan, its intro and the hidden space's parts.
+                            if defaults.string(forKey: "path") != nil {
+                                while model.phase != .done { try? await Task.sleep(for: .milliseconds(200)) }
+                                try? await Task.sleep(for: .seconds(3))
+                            }
                             Screenshot.save(to: file)
                             NSApp.terminate(nil)
                         }
