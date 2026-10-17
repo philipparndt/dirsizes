@@ -842,17 +842,35 @@ final class ScanModel {
         // Hidden space's parts may still be loading; they show when they arrive.
         guard center == 0, openedSpecial == nil,
               extraParts[kind] != nil || (kind == .hidden && loadingHiddenSpace) else { return }
+        let root = segments
         openedSpecial = kind
         hoveredSpecial = nil
         intro = nil
         segments = layout(center: 0)
+        if openedParts != nil { animate(kind, root: root, opened: segments, zoomingIn: true) }
     }
 
     func closeSpecial() {
-        guard openedSpecial != nil else { return }
+        guard let kind = openedSpecial else { return }
+        let opened = openedParts != nil ? segments : nil
         openedSpecial = nil
         hoveredSpecial = nil
         segments = layout(center: center)
+        if let opened { animate(kind, root: segments, opened: opened, zoomingIn: false) }
+    }
+
+    /// Zooms between the root chart and opened hidden or free space, like into a folder: the
+    /// parts grow from the ring outside its wedge to the full circle.
+    private func animate(_ kind: SpecialSpace, root: [Segment], opened: [Segment], zoomingIn: Bool) {
+        guard let wedge = root.first(where: { $0.special == kind && $0.depth == 1 }) else { return }
+        let next = ZoomTransition(outer: 0, inner: 0, outerSegments: root, innerSegments: opened,
+                                  slice: SunburstLayout.Slice(start: wedge.start, end: wedge.end, depth: 1),
+                                  zoomingIn: zoomingIn)
+        transition = next
+        Task {
+            try? await Task.sleep(for: .seconds(ZoomTransition.duration))
+            if self.transition?.id == next.id { self.transition = nil }
+        }
     }
 
     func zoomOut() {
