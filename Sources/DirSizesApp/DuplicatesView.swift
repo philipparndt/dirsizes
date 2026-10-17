@@ -91,22 +91,34 @@ struct DuplicatesList: View {
 
     private var progress: some View {
         let progress = model.duplicateProgress
-        return VStack(spacing: 12) {
-            switch progress.stage {
-            case .listing:
-                ProgressView("Looking for files of the same size…")
-            case .sampling, .hashing:
-                ProgressView(value: Double(progress.bytesDone), total: Double(max(progress.bytesTotal, 1))) {
-                    Text(progress.stage == .sampling
-                         ? "Comparing the start and end of \(progress.files) files…"
-                         : "Comparing \(progress.files) files in full…")
-                } currentValueLabel: {
+        // Listing files has no measurable progress.
+        let fraction = progress.stage == .listing || progress.bytesTotal == 0
+            ? nil : min(Double(progress.bytesDone) / Double(progress.bytesTotal), 1)
+        let title = switch progress.stage {
+        case .listing: "Looking for files of the same size…"
+        case .sampling: "Comparing the start and end of \(progress.files.formatted()) files…"
+        case .hashing: "Comparing \(progress.files.formatted()) files in full…"
+        }
+        return VStack(spacing: 14) {
+            Text(title)
+                .font(.headline)
+            ProgressBar(progress: fraction)
+                .frame(width: 420, height: 14)
+            HStack(spacing: 6) {
+                if let fraction {
+                    Text(fraction, format: .percent.precision(.fractionLength(0)))
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.primary)
+                    Text("·")
                     Text("\(formatBytes(progress.bytesDone)) of \(formatBytes(progress.bytesTotal))")
-                        .monospacedDigit()
                 }
-                .frame(width: 320)
             }
+            .font(.callout.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .contentTransition(.numericText())
+            .animation(.default, value: progress.bytesDone)
             Button("Stop") { model.resetDuplicates() }
+                .controlSize(.large)
         }
     }
 
