@@ -62,6 +62,8 @@ final class ScanModel {
     private(set) var loadingHiddenSpace = false
     /// Hovered free or hidden space segment.
     var hoveredSpecial: SpecialSpace?
+    /// Hidden space opened like a folder: the chart and list show its parts.
+    private(set) var openedSpecial: SpecialSpace?
     private(set) var tree: FileTree?
     private(set) var center: Int32 = 0
     private(set) var segments: [Segment] = []
@@ -223,7 +225,9 @@ final class ScanModel {
                 + [(.hiddenPart(HiddenSpace.rest), max(hidden - hiddenSpace.volumesTotal, 0))]
         }
         if volume.purgeableBytes > 0 {
-            parts[.free] = [(.purgeable, volume.purgeableBytes)]
+            let free = extras.first { $0.0 == .free }?.1 ?? 0
+            parts[.free] = [(.purgeable, min(volume.purgeableBytes, free)),
+                            (.availableNow, max(free - volume.purgeableBytes, 0))]
         }
         return parts
     }
@@ -255,6 +259,7 @@ final class ScanModel {
         case .hiddenPart(HiddenSpace.rest): "Unread folders and system data"
         case .hiddenPart(let name): name
         case .purgeable: "Purgeable"
+        case .availableNow: "Available now"
         }
     }
 
@@ -263,7 +268,7 @@ final class ScanModel {
         let key = switch special {
         case .iCloud(let key): key
         case .photosInCloud: "photos"
-        case .free, .hidden, .hiddenPart, .purgeable: ""
+        case .free, .hidden, .hiddenPart, .purgeable, .availableNow: ""
         }
         return iCloudMedia(key).map(ICloudStorage.color)
     }
@@ -354,6 +359,7 @@ final class ScanModel {
         startupItems = nil
         hovered = nil
         hoveredSpecial = nil
+        openedSpecial = nil
         loadVolumes()
     }
 
@@ -510,6 +516,7 @@ final class ScanModel {
         scannedVolume = nil
         hiddenSpace = nil
         hoveredSpecial = nil
+        openedSpecial = nil
         phase = .scanning
         tree = nil
         center = 0
@@ -749,6 +756,10 @@ final class ScanModel {
     /// Zooms to `node`, a directory that is an ancestor or descendant of the current center.
     /// Animates the target's slice expanding to the full circle, or collapsing back into its parent.
     func zoom(to node: Int32) {
+        if openedSpecial != nil {
+            closeSpecial()
+            if node == center { return }
+        }
         guard let tree, node != center, tree.nodes[Int(node)].isDirectory else { return }
         let newSegments = layout(center: node)
         let zoomingIn = tree.ancestry(of: node).contains(center)
@@ -775,6 +786,7 @@ final class ScanModel {
 
     private func layout(center: Int32) -> [Segment] {
         guard let tree else { return [] }
+        if center == 0, let parts = openedParts { return SunburstLayout.segments(parts: parts) }
         var fixedHues: [Int32: Double] = [:]
         if let node = photosLibraryNode, let hue = color(of: .photosInCloud).flatMap(Self.hue) { fixedHues[node] = hue }
         return SunburstLayout.segments(tree: tree, center: center, rings: Self.rings, extras: extras,
@@ -818,7 +830,33 @@ final class ScanModel {
         segments = layout(center: center)
     }
 
+    /// The parts of `openedSpecial`, when it is open.
+    var openedParts: [(SpecialSpace, Int64)]? {
+        guard center == 0, let openedSpecial else { return nil }
+        return extraParts[openedSpecial]
+    }
+
+    /// Opens hidden space (also when a part of it is clicked), when its parts are known.
+    func open(_ special: SpecialSpace) {
+        let kind = special.whole ?? special
+        // Hidden space's parts may still be loading; they show when they arrive.
+        guard center == 0, openedSpecial == nil,
+              extraParts[kind] != nil || (kind == .hidden && loadingHiddenSpace) else { return }
+        openedSpecial = kind
+        hoveredSpecial = nil
+        intro = nil
+        segments = layout(center: 0)
+    }
+
+    func closeSpecial() {
+        guard openedSpecial != nil else { return }
+        openedSpecial = nil
+        hoveredSpecial = nil
+        segments = layout(center: center)
+    }
+
     func zoomOut() {
+        if openedSpecial != nil { return closeSpecial() }
         guard let tree else { return }
         let parent = tree.nodes[Int(center)].parent
         if parent >= 0 { zoom(to: parent) }

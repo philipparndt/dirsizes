@@ -56,7 +56,7 @@ struct ContentView: View {
                     .help("Show all disks")
                     .disabled(model.rootPath == nil)
                 Button("Up", systemImage: "chevron.up") { model.zoomOut() }
-                    .disabled(model.center == 0)
+                    .disabled(model.center == 0 && model.openedParts == nil)
                 if model.phase == .scanning {
                     Button("Stop", systemImage: "stop.fill") { model.stop() }
                 } else {
@@ -119,7 +119,13 @@ private struct Breadcrumbs: View {
                             model.zoom(to: node)
                         }
                             .buttonStyle(.plain)
-                            .foregroundStyle(node == model.center ? .primary : .secondary)
+                            .foregroundStyle(node == model.center && model.openedParts == nil ? .primary : .secondary)
+                    }
+                    if let opened = model.openedSpecial, model.openedParts != nil {
+                        Image(systemName: "chevron.right")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Text(model.label(of: opened))
                     }
                 }
                 .padding(.horizontal, 12)
@@ -140,10 +146,11 @@ private struct ChildList: View {
 
     var body: some View {
         if let tree = model.tree {
-            let extras = model.center == 0 ? model.extras : []
+            let extras = model.openedParts ?? (model.center == 0 ? model.extras : [])
             let bytes = Dictionary(extras, uniquingKeysWith: { a, _ in a })
-            let parentSize = max(tree.nodes[Int(model.center)].size + extras.reduce(0) { $0 + $1.1 }, 1)
-            let rows = (tree.children(of: model.center).prefix(500).map(Row.node)
+            let opened = model.openedParts != nil
+            let parentSize = max((opened ? 0 : tree.nodes[Int(model.center)].size) + extras.reduce(0) { $0 + $1.1 }, 1)
+            let rows = ((opened ? [] : tree.children(of: model.center).prefix(500).map(Row.node))
                         + extras.filter { $0.1 > 0 }.map { Row.special($0.0) })
                 .sorted { size(of: $0, tree: tree, extras: bytes) > size(of: $1, tree: tree, extras: bytes) }
             List(rows, id: \.self) { row in
@@ -218,7 +225,10 @@ private struct SpecialRow: View {
             // Only the title line: the details below aren't part of the highlight.
             .background(model.hoveredSpecial == kind ? Color.accentColor.opacity(0.12) : .clear)
             .contentShape(Rectangle())
-            .onTapGesture { expanded.toggle() }
+            // Hidden and free space open like folders when their parts are known.
+            .onTapGesture {
+                if model.openedParts == nil, model.extraParts[kind] != nil || (kind == .hidden && model.loadingHiddenSpace) { model.open(kind) } else { expanded.toggle() }
+            }
             .onHover { inside in
                 if inside { model.hoveredSpecial = kind } else if model.hoveredSpecial == kind { model.hoveredSpecial = nil }
             }
@@ -227,7 +237,7 @@ private struct SpecialRow: View {
 
     private var tint: Color {
         switch kind {
-        case .free, .purgeable: .secondary
+        case .free, .purgeable, .availableNow: .secondary
         case .hidden, .hiddenPart: .gray
         case .iCloud, .photosInCloud: model.color(of: kind) ?? .gray
         }
@@ -236,8 +246,10 @@ private struct SpecialRow: View {
     private var icon: String {
         switch kind {
         case .free: "circle.dashed"
-        case .hidden, .hiddenPart: "eye.slash"
+        case .hidden, .hiddenPart(HiddenSpace.rest): "eye.slash"
+        case .hiddenPart(let name): model.hiddenSpace?.volumes.first { $0.name == name }?.icon ?? "externaldrive"
         case .purgeable: "arrow.3.trianglepath"
+        case .availableNow: "circle.dashed"
         case .iCloud(let key):
             switch key {
             case "photos": "photo.on.rectangle"
@@ -261,26 +273,34 @@ private struct SpecialDetails: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             switch kind {
-            case .free, .purgeable:
+            case .free:
                 note(model.iCloudUsage != nil ? "Left in your iCloud plan." : "Available on \(model.rootName).")
                 if model.iCloudUsage == nil, let purgeable = model.extraParts[.free]?.first?.1 {
                     detail("Purgeable", purgeable, icon: "arrow.3.trianglepath")
                         .help("Counted as free: macOS frees it on its own when space runs low. Mostly local "
                               + "Time Machine snapshots, also caches and files that are also in iCloud.")
                 }
-            case .hidden, .hiddenPart:
+            case .purgeable:
+                note("Counted as free: macOS frees it on its own when space runs low. Mostly local Time Machine "
+                     + "snapshots, also caches and files that are also in iCloud.")
+                SnapshotDetails()
+            case .availableNow:
+                note("Free right away, without macOS having to remove anything.")
+            case .hiddenPart(HiddenSpace.rest):
+                note(HiddenSpace.restNote)
+                UnreadableDetails()
+            case .hiddenPart(let name):
+                if let part = model.hiddenSpace?.volumes.first(where: { $0.name == name }) {
+                    note(part.note)
+                }
+                if name == HiddenSpace.swapName, let swap = model.hiddenSpace?.swapUsed, swap > 0 {
+                    note("Swap in use now: \(formatBytes(swap)).")
+                }
+            case .hidden:
                 note("Used on the disk, but not seen by the scan: the system volume, APFS snapshots (Time Machine), "
                      + "swap and sleep image, and folders DirSizes couldn't read.")
                 HiddenDetails()
-                let unreadable = model.unreadableFolders
-                if !unreadable.isEmpty {
-                    note("\(unreadable.count.formatted()) folders couldn't be read. \(model.unreadableHint)")
-                    if !FullDiskAccess.isGranted {
-                        Button("Open Full Disk Access Settings") { FullDiskAccess.openSettings() }
-                            .buttonStyle(.link)
-                    }
-                    UnreadableList(paths: unreadable)
-                }
+                UnreadableDetails()
             case .iCloud("docs"):
                 note("In iCloud under Documents, but not as files in iCloud Drive: app data apps keep in iCloud, "
                      + "Recently Deleted, and versions of documents.")
@@ -334,9 +354,6 @@ private struct SpecialDetails: View {
 /// scanned volume but not in its files.
 private struct HiddenDetails: View {
     @Environment(ScanModel.self) private var model
-    @State private var confirmsDeletion = false
-    @State private var deleting = false
-    @State private var error: String?
 
     var body: some View {
         Group {
@@ -351,6 +368,31 @@ private struct HiddenDetails: View {
                 if let swap = hidden.swapUsed, swap > 0 {
                     note("Swap in use now: \(formatBytes(swap)).")
                 }
+                SnapshotDetails()
+            } else if model.loadingHiddenSpace {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .onAppear { model.loadHiddenSpace() }
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Local Time Machine snapshots, with a button to delete them.
+private struct SnapshotDetails: View {
+    @Environment(ScanModel.self) private var model
+    @State private var confirmsDeletion = false
+    @State private var deleting = false
+    @State private var error: String?
+
+    var body: some View {
+        Group {
+            if let hidden = model.hiddenSpace {
                 if let oldest = hidden.snapshots.first {
                     note("\(hidden.snapshots.count) local Time Machine \(hidden.snapshots.count == 1 ? "snapshot" : "snapshots"), "
                          + "the oldest from \(oldest.formatted(.relative(presentation: .named))). They keep earlier versions "
@@ -375,8 +417,6 @@ private struct HiddenDetails: View {
                 if let error {
                     note(error)
                 }
-            } else if model.loadingHiddenSpace {
-                ProgressView().controlSize(.small)
             }
         }
         .onAppear { model.loadHiddenSpace() }
@@ -386,6 +426,25 @@ private struct HiddenDetails: View {
         Text(text)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Folders the scan couldn't read, with what to do about it.
+private struct UnreadableDetails: View {
+    @Environment(ScanModel.self) private var model
+
+    var body: some View {
+        let unreadable = model.unreadableFolders
+        if !unreadable.isEmpty {
+            Text("\(unreadable.count.formatted()) folders couldn't be read. \(model.unreadableHint)")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !FullDiskAccess.isGranted {
+                Button("Open Full Disk Access Settings") { FullDiskAccess.openSettings() }
+                    .buttonStyle(.link)
+            }
+            UnreadableList(paths: unreadable)
+        }
     }
 }
 

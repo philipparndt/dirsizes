@@ -25,6 +25,7 @@ struct HiddenSpace: Sendable {
     /// The name of what's left of hidden space after the other volumes: in the scanned volume,
     /// but not in its files.
     static let rest = "\u{1}rest"
+    static let swapName = "Swap and sleep image"
     static let restNote = "In the scanned volume but not in its files: folders that couldn't be read, and file "
         + "system data. Estimated as what's left. macOS counts most of the space of local snapshots as "
         + "purgeable, so it's in free space."
@@ -49,7 +50,7 @@ struct HiddenSpace: Sendable {
                 return Part(name: "macOS", icon: "apple.logo", bytes: bytes,
                             note: "The read-only system volume (\(name)).")
             case "VM":
-                return Part(name: "Swap and sleep image", icon: "memorychip", bytes: bytes,
+                return Part(name: swapName, icon: "memorychip", bytes: bytes,
                             note: "Memory written to disk when RAM runs short, and the sleep image. Shrinks after restarting.")
             case "Preboot":
                 return Part(name: "Startup files", icon: "power", bytes: bytes,

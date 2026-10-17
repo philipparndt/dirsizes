@@ -15,8 +15,19 @@ enum SpecialSpace: Hashable, Sendable {
     case photosInCloud
     /// A part of hidden space, in the ring outside it: another volume by name, or "rest".
     case hiddenPart(String)
+
+    /// What this is a part of, for parts of hidden and free space.
+    var whole: SpecialSpace? {
+        switch self {
+        case .hiddenPart: .hidden
+        case .purgeable, .availableNow: .free
+        default: nil
+        }
+    }
     /// The part of free space macOS frees on its own, in the ring outside free space.
     case purgeable
+    /// The rest of free space: free right away.
+    case availableNow
 
     /// Identifies the segment across layouts.
     var key: String {
@@ -27,6 +38,7 @@ enum SpecialSpace: Hashable, Sendable {
         case .photosInCloud: "\u{1}icloud:photos/cloud"
         case .hiddenPart(let name): "\u{1}hidden/" + name
         case .purgeable: "\u{1}free/purgeable"
+        case .availableNow: "\u{1}free/now"
         }
     }
 }
@@ -224,6 +236,22 @@ enum SunburstLayout {
                     }
                     partAngle = end
                 }
+            }
+            angle += sweep
+        }
+        return result
+    }
+
+    /// Opened hidden space: its parts around the whole circle.
+    static func segments(parts: [(SpecialSpace, Int64)]) -> [Segment] {
+        let total = Double(parts.reduce(0) { $0 + $1.1 })
+        guard total > 0 else { return [] }
+        var result: [Segment] = []
+        var angle = 0.0
+        for (part, bytes) in parts {
+            let sweep = 2 * .pi * Double(bytes) / total
+            if sweep >= minAngle {
+                result.append(Segment(node: -1, depth: 1, start: angle, end: angle + sweep, special: part))
             }
             angle += sweep
         }

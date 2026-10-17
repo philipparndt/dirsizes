@@ -49,7 +49,8 @@ struct SunburstView: View {
                 switch geometry.hitTest(point, segments: model.segments) {
                 case .center: model.zoomOut()
                 case .segment(let node): model.zoom(to: node)
-                case .special, nil: break
+                case .special(let kind): model.open(kind)
+                case nil: break
                 }
             }
             .onDrag {
@@ -195,16 +196,18 @@ struct SunburstView: View {
             let fill = tint ?? .gray
             context.fill(path, with: .color(fill.opacity((highlighted ? 0.5 : 0.3) * opacity)))
             context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor).opacity(opacity)), lineWidth: 0.75)
-        case .free:
+        case .free, .availableNow:
             context.fill(path, with: .color(.primary.opacity((highlighted ? 0.12 : 0.05) * opacity)))
             context.stroke(path, with: .color(.secondary.opacity(0.5 * opacity)),
                            style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
         case .hidden:
             context.fill(path, with: .color(.gray.opacity((highlighted ? 0.75 : 0.5) * opacity)))
             context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor).opacity(opacity)), lineWidth: 0.75)
-        case .hiddenPart:
-            // Lighter than hidden space, like an outer ring of a folder.
-            context.fill(path, with: .color(.gray.opacity((highlighted ? 0.6 : 0.35) * opacity)))
+        case .hiddenPart(let name):
+            // Lighter than hidden space, like an outer ring of a folder, in a shade of its own so
+            // neighbors stand apart.
+            let shade = Double(name.unicodeScalars.reduce(0) { $0 + Int($1.value) } % 4) * 0.07
+            context.fill(path, with: .color(.gray.opacity((highlighted ? 0.65 : 0.25 + shade) * opacity)))
             context.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor).opacity(opacity)), lineWidth: 0.75)
         case .purgeable:
             // Free space with something in it for now.
@@ -298,6 +301,19 @@ private struct CenterLabel: View {
                     .multilineTextAlignment(.center)
             }
             .frame(width: width)
+        } else if let opened = model.openedSpecial, model.openedParts != nil {
+            VStack(spacing: 4) {
+                Text(model.label(of: opened))
+                    .font(.subheadline.weight(.medium))
+                Text(formatBytes(model.bytes(of: opened)))
+                    .font(.title3.monospacedDigit().weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                Text("click to go up")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(width: width)
         } else if let tree = model.tree {
             let node = tree.nodes[Int(model.focused)]
             VStack(spacing: 4) {
@@ -357,6 +373,7 @@ extension CenterLabel {
         case .hiddenPart(HiddenSpace.rest): "unreadable folders, file system data"
         case .hiddenPart: "a volume on this disk"
         case .purgeable: "counted as free; macOS frees it when needed"
+        case .availableNow: "free right away"
         }
     }
 }
