@@ -456,6 +456,7 @@ final class ScanModel {
         for path in ["Library/Developer/Xcode/DerivedData", "dev/web-shop/node_modules", "Downloads/Xcode_27.xip"] {
             if let node = tree.node(atPath: tree.path(of: 0) + "/" + path) { collect(node) }
         }
+        findQuickSuggestions()
     }
 
     private func startScan(path: String, full: Bool = false, countingCloudFiles: Bool = false) {
@@ -581,10 +582,15 @@ final class ScanModel {
                 }
                 result.tree.read { SizeHistory.record($0) }
                 DiskScanner.save(result)
-                await MainActor.run { self.refreshSavedScans() }
+                await MainActor.run {
+                    self.refreshSavedScans()
+                    // After recording: the first time, the snapshot to compare with is the one above.
+                    if self.tree === result.tree { self.findSizeChanges() }
+                }
             }
         }
         startMonitoring(result.tree, rootPath: scanner.rootPath)
+        if !scanner.isCancelled { findQuickSuggestions() }
     }
 
     /// Progress estimates are kept apart for scans counting cloud files: their totals differ.
@@ -829,6 +835,23 @@ final class ScanModel {
         return [NSHomeDirectory() + "/Library", "/Library"].compactMap { path in
             DataVolume.candidates(for: path).first { tree.node(atPath: $0) != nil }
         }
+    }
+
+    /// Runs the finders that take a second or so, for the summary below the chart. Duplicates
+    /// read every file, so they wait until asked for.
+    func findQuickSuggestions() {
+        findLeftovers()
+        findUnusedApps()
+        findDeveloperCaches()
+        findOldFiles()
+        findStartupItems()
+    }
+
+    /// The size of `nodes`, counting what's inside another of them once.
+    func uniqueSize(of nodes: Set<Int32>) -> Int64 {
+        guard let tree else { return 0 }
+        return nodes.filter { !tree.ancestry(of: $0).dropLast().contains(where: nodes.contains) }
+            .reduce(0) { $0 + tree.nodes[Int($1)].size }
     }
 
     func showCleanup() {

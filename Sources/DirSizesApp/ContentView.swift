@@ -32,6 +32,7 @@ struct ContentView: View {
                     }
                     .frame(minWidth: 260, idealWidth: 320, maxWidth: 480)
                 }
+                CleanupSummary()
             }
             Divider()
             StatusBar()
@@ -103,12 +104,14 @@ private struct Breadcrumbs: View {
         if let tree = model.tree {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 2) {
+                    Button("Disks", systemImage: "internaldrive") { model.showStart() }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Show all disks")
                     ForEach(tree.ancestry(of: model.center), id: \.self) { node in
-                        if node != 0 {
-                            Image(systemName: "chevron.right")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
+                        Image(systemName: "chevron.right")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                         Button(node == 0
                                ? (model.iCloudUsage != nil ? model.rootName : nil) ?? model.scannedVolume?.name
                                    ?? CloudFolder.displayName(ofPath: tree.path(of: 0)) ?? tree.path(of: 0)

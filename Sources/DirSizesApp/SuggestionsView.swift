@@ -87,15 +87,7 @@ struct SuggestionsList<Header: View>: View {
     }
 
     /// The sections with what passes the age filter.
-    var shown: [SuggestionSection] {
-        let cutoff = months > 0 ? Calendar.current.date(byAdding: .month, value: -months, to: Date()) : nil
-        return sections.compactMap { section in
-            guard section.byAge, let cutoff else { return section }
-            let old = section.suggestions.filter { ($0.date ?? .distantPast) < cutoff }
-            return old.isEmpty ? nil
-                : SuggestionSection(title: section.title, byAge: true, grouping: section.grouping, suggestions: old)
-        }
-    }
+    var shown: [SuggestionSection] { sections.olderThan(months: months) }
 
     private func rows(_ section: SuggestionSection) -> [Row] {
         section.suggestions.map { suggestion in
@@ -127,6 +119,20 @@ struct SuggestionsList<Header: View>: View {
     }
 }
 
+extension [SuggestionSection] {
+    /// With what passes the age filter: in sections with dates, what's older than `months`
+    /// (0: everything).
+    func olderThan(months: Int) -> [SuggestionSection] {
+        let cutoff = months > 0 ? Calendar.current.date(byAdding: .month, value: -months, to: Date()) : nil
+        return compactMap { section in
+            guard section.byAge, let cutoff else { return section }
+            let old = section.suggestions.filter { ($0.date ?? .distantPast) < cutoff }
+            return old.isEmpty ? nil
+                : SuggestionSection(title: section.title, byAge: true, grouping: section.grouping, suggestions: old)
+        }
+    }
+}
+
 /// How much is selected and how much of the list is in the collector, with a button to add
 /// the selection.
 struct SelectionBar: View {
@@ -152,12 +158,7 @@ struct SelectionBar: View {
         .font(.callout)
     }
 
-    /// Counts what's inside another of the nodes once.
-    private func size(of nodes: Set<Int32>) -> Int64 {
-        guard let tree = model.tree else { return 0 }
-        return nodes.filter { !tree.ancestry(of: $0).dropLast().contains(where: nodes.contains) }
-            .reduce(0) { $0 + tree.nodes[Int($1)].size }
-    }
+    private func size(of nodes: Set<Int32>) -> Int64 { model.uniqueSize(of: nodes) }
 }
 
 /// The header above a suggestions list: a title, its total and an explanation.
