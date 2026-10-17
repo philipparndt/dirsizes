@@ -102,11 +102,12 @@ struct SunburstView: View {
         let hoveredChain = model.hovered.map { Set(tree.ancestry(of: $0)) } ?? []
         let collected = Set(model.collected)
         let gone = model.gone
-        func drawSegment(_ segment: Segment, start: Double, end: Double, depth: Double, opacity: Double) {
+        func drawSegment(_ segment: Segment, start: Double, end: Double, depth: Double, opacity: Double,
+                         thickness: Double? = nil) {
             guard opacity > 0.01 else { return }
             if let special = segment.special {
-                drawSpecial(special, start: start, end: end, depth: depth, opacity: opacity,
-                            in: &context, geometry: geometry)
+                drawSpecial(special, start: start, end: end, depth: depth, thickness: thickness ?? segment.thickness,
+                            opacity: opacity, in: &context, geometry: geometry)
                 return
             }
             // Items in the collector (and everything inside them) are dimmed.
@@ -139,7 +140,9 @@ struct SunburstView: View {
                 // Same cut-off as the layout, applied to the on-screen size. Otherwise slivers
                 // squeezed into the slice would vanish all at once when the animation ends.
                 guard end - start >= SunburstLayout.minAngle else { continue }
-                drawSegment(segment, start: start, end: end, depth: Double(segment.depth) + shift, opacity: 1)
+                // Opened hidden or free space grows from its one ring to the whole chart.
+                drawSegment(segment, start: start, end: end, depth: Double(segment.depth) + shift, opacity: 1,
+                            thickness: lerp(1, segment.thickness, expansion))
             }
         } else {
             for segment in model.segments {
@@ -175,9 +178,9 @@ struct SunburstView: View {
     }
 
     /// Free space is drawn as an empty, outlined slot; hidden space as solid gray.
-    private func drawSpecial(_ kind: SpecialSpace, start: Double, end: Double, depth: Double, opacity: Double,
-                             in context: inout GraphicsContext, geometry: SunburstGeometry) {
-        guard let path = geometry.wedge(start: start, end: end, depth: depth) else { return }
+    private func drawSpecial(_ kind: SpecialSpace, start: Double, end: Double, depth: Double, thickness: Double = 1,
+                             opacity: Double, in context: inout GraphicsContext, geometry: SunburstGeometry) {
+        guard let path = geometry.wedge(start: start, end: end, depth: depth, thickness: thickness) else { return }
         Self.fillSpecial(kind, path: path, highlighted: model.hoveredSpecial == kind, tint: model.color(of: kind),
                          opacity: opacity, in: &context)
     }
