@@ -116,6 +116,8 @@ final class ScanModel {
     /// Old downloads, device backups and device software; nil until looked for.
     private(set) var oldFiles: [SuggestionSection]?
     private(set) var findingOldFiles = false
+    /// Folders in ~/Library/CloudStorage nothing syncs anymore; nil until looked for.
+    private(set) var oldCloudFolders: [SuggestionSection]?
     /// Earlier scans' sizes to compare with, newest first; nil until looked for.
     private(set) var sizeSnapshots: [(date: Date, rootPath: String, url: URL)]?
     /// What changed since the snapshot at `base`.
@@ -353,6 +355,7 @@ final class ScanModel {
         unusedApps = nil
         developerCaches = nil
         oldFiles = nil
+        oldCloudFolders = nil
         sizeSnapshots = nil
         sizeChanges = nil
         resetDuplicates()
@@ -530,6 +533,7 @@ final class ScanModel {
         unusedApps = nil
         developerCaches = nil
         oldFiles = nil
+        oldCloudFolders = nil
         sizeSnapshots = nil
         sizeChanges = nil
         resetDuplicates()
@@ -923,6 +927,7 @@ final class ScanModel {
         findUnusedApps()
         findDeveloperCaches()
         findOldFiles()
+        findOldCloudFolders()
         findStartupItems()
     }
 
@@ -1039,6 +1044,12 @@ final class ScanModel {
                 if self.tree === tree { self.oldFiles = found }
             }
         }
+    }
+
+    /// Quick: only the folders in CloudStorage are looked at.
+    func findOldCloudFolders() {
+        guard let tree else { return }
+        oldCloudFolders = scannedHome.map { home in tree.read { CloudStorage.oldFolders(in: $0, home: home) } } ?? []
     }
 
     /// Looks up what the hidden space is made of (other volumes, snapshots, swap), again each
@@ -1238,6 +1249,7 @@ final class ScanModel {
         if unusedApps != nil { findUnusedApps() }
         if developerCaches != nil { findDeveloperCaches() }
         if oldFiles != nil { findOldFiles() }
+        if oldCloudFolders != nil { findOldCloudFolders() }
         if let sizeChanges { findSizeChanges(since: sizeChanges.base) }
         duplicates = duplicates?.compactMap { $0.remaining(in: tree) }
         if startupItems != nil { findStartupItems() }

@@ -122,6 +122,12 @@ struct CleanupSummary: View {
                 note: "Old downloads, iPhone and iPad backups, and device software updates.",
                 entries: entries(suggestions))
         }
+        if let old = model.oldCloudFolders {
+            let suggestions = old.flatMap(\.suggestions)
+            add(.oldCloudFolders, "Old cloud folders", "icloud.slash", suggestions.flatMap(\.items),
+                note: "Cloud folders nothing syncs anymore, kept after a location was removed or reset.",
+                entries: entries(suggestions))
+        }
         if let duplicates = model.duplicates {
             let groups = duplicates.filter { $0.size >= duplicatesMinimumSize }
             add(.duplicates, "Duplicates", "doc.on.doc",

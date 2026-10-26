@@ -6,7 +6,7 @@ import SwiftUI
 /// an earlier scan. Suggestions only go into the collector; deleting stays with the collector.
 struct CleanupView: View {
     enum Tab: String {
-        case leftBehind, unusedApps, developer, oldFiles, changes, duplicates, startupItems
+        case leftBehind, unusedApps, developer, oldFiles, changes, duplicates, startupItems, oldCloudFolders
     }
 
     @Environment(ScanModel.self) private var model
@@ -93,6 +93,8 @@ struct CleanupView: View {
                     Toggle("Show entries to check", isOn: $showsCheck)
                         .toggleStyle(.checkbox)
                         .help("Also list items that may still belong to something installed")
+                case .oldCloudFolders:
+                    EmptyView()
                 }
             }
             .padding(.horizontal, 12)
@@ -132,6 +134,9 @@ struct CleanupView: View {
                 Label("Old Files", systemImage: "clock.arrow.circlepath").tag(Tab.oldFiles)
                 Label("Duplicates", systemImage: "doc.on.doc").tag(Tab.duplicates)
             }
+            Section("Cloud") {
+                Label("Old Cloud Folders", systemImage: "icloud.slash").tag(Tab.oldCloudFolders)
+            }
             Section("Over Time") {
                 Label("Changes", systemImage: "chart.line.uptrend.xyaxis").tag(Tab.changes)
             }
@@ -150,6 +155,7 @@ struct CleanupView: View {
                 case .changes: ChangesList()
                 case .duplicates: DuplicatesList(minimumSize: Int64(duplicatesMinimumSize))
                 case .startupItems: StartupItemsList(showsCheck: showsCheck)
+                case .oldCloudFolders: oldCloudFolders
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -165,6 +171,7 @@ struct CleanupView: View {
         case .unusedApps: if model.unusedApps == nil { model.findUnusedApps() }
         case .developer: if model.developerCaches == nil { model.findDeveloperCaches() }
         case .oldFiles: if model.oldFiles == nil { model.findOldFiles() }
+        case .oldCloudFolders: if model.oldCloudFolders == nil { model.findOldCloudFolders() }
         case .changes: if model.sizeSnapshots == nil { model.findSizeChanges() }
         }
     }
@@ -222,6 +229,35 @@ struct CleanupView: View {
             }
         } else {
             ProgressView("Looking at your downloads…")
+        }
+    }
+
+    @ViewBuilder
+    private var oldCloudFolders: some View {
+        if let sections = model.oldCloudFolders {
+            if model.scannedHome == nil {
+                ContentUnavailableView {
+                    Label("No home folder in this scan", systemImage: "icloud.slash")
+                } description: {
+                    Text("Cloud apps keep their folders in ~/Library/CloudStorage. Scan your home folder or the startup disk to find the ones nothing syncs anymore.")
+                } actions: {
+                    Button("Scan Home Folder") { model.scan(path: NSHomeDirectory()) }
+                }
+            } else if sections.isEmpty {
+                ContentUnavailableView("No old cloud folders", systemImage: "checkmark.seal",
+                                       description: Text("Every folder in ~/Library/CloudStorage is still synced."))
+            } else {
+                SuggestionsList(sections: sections, months: 0) {
+                    SuggestionsHeader(title: "Cloud folders nothing syncs anymore", sections: sections, text: """
+                        When a OneDrive, Dropbox or Google Drive location is removed or reset, macOS keeps \
+                        its local files in a folder named with the date, and Finder stops showing it. They \
+                        are usually also in the cloud, but changes that were never uploaded are only here: \
+                        look before removing them.
+                        """)
+                }
+            }
+        } else {
+            ProgressView("Looking at cloud folders…")
         }
     }
 

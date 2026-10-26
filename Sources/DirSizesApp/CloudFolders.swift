@@ -20,8 +20,10 @@ struct CloudFolder: Identifiable {
             folders.append(CloudFolder(name: "iCloud Drive", path: iCloudPath, isICloud: true))
         }
         let providers = (try? files.contentsOfDirectory(atPath: cloudStoragePath)) ?? []
-        for name in providers.sorted() where !name.hasPrefix(".") {
+        // Like Finder: only synced locations. Folders kept after a reset are in Cleanup.
+        for name in providers.sorted() where !name.hasPrefix(".") && !CloudStorage.isInternal(name) {
             let path = cloudStoragePath + "/" + name
+            guard CloudStorage.isSynced(path) else { continue }
             folders.append(CloudFolder(name: files.displayName(atPath: path), path: path, isICloud: false))
         }
         return folders
